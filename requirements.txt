@@ -1,0 +1,14 @@
+geopandas
+numpy
+pandas
+rasterio
+rioxarray
+scikit-learn
+shap
+streamlit
+folium
+streamlit-folium
+matplotlib
+seaborn
+joblib
+pyyaml
