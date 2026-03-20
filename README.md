@@ -342,13 +342,6 @@ Satisfied by:
 
 - Streamlit dashboard in `src/app/app.py`
 
-### Mandatory ChatGPT reflection
-
-Prepared in:
-
-- `reports/chatgpt_reflection.md`
-- `reports/chatgpt_usage_log.md`
-
 ## 11. Key Implementation Decisions
 
 These are the main project choices and why they were made.
@@ -391,8 +384,6 @@ That directly satisfies the assignment.
 
 - `reports/final_report_outline.md`
 - `reports/assignment_checklist.md`
-- `reports/chatgpt_reflection.md`
-- `reports/chatgpt_usage_log.md`
 - `reports/demo_video_script.md`
 
 ## 14. Current Status

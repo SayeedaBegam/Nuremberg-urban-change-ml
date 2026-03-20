@@ -64,11 +64,6 @@ This file maps the assignment requirements to concrete project outputs so nothin
   - uncertainty display
   - limitation notes
 
-## Mandatory reflection
-
-- `reports/chatgpt_reflection.md`
-- `reports/chatgpt_usage_log.md`
-
 ## Still dependent on real data
 
 - Optional exact Nuremberg boundary file
