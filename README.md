@@ -1,414 +1,574 @@
 # Mapping Urban Change in Nuremberg with Machine Learning
 
-This repository contains the final assignment project for **Machine Learning WT 25/26** at **UTN**.  
-The project builds a tabular machine learning system that predicts **land-cover composition** and **land-cover change** in Nuremberg from satellite imagery and ESA WorldCover labels, then presents the results in a small interactive dashboard.
+This repository contains the final assignment project for **Machine Learning WT 25/26** at **UTN**. It is a **strictly tabular machine learning** project for modeling land-cover composition and urban change in **Nuremberg, Germany** using aggregated Sentinel-2 features and ESA WorldCover labels.
 
-## 1. Assignment Goal
+The repository now contains two closely related layers of work:
 
-The assignment asks for a model-based system that:
+- the original course scaffold and tabular geospatial ML pipeline in `src/data`, `src/models`, and `src/app`
+- the current **Earth Engine-driven temporal pipeline** that builds annual tabular features and trains multi-output regression models for `2019 -> 2020` and `2020 -> 2021`
 
-- uses **satellite imagery** for at least two time periods
-- uses **ESA WorldCover** as the main source of land-cover labels
-- works with **tabular features**, not CNNs or end-to-end computer vision
-- predicts **land-cover composition** and **land-cover change**
-- evaluates models beyond plain accuracy
-- communicates **uncertainty**, **limitations**, and **trust** to non-experts
-- provides a working **interactive product**
+The current focus of the repository is:
 
-This repository was built specifically around those requirements.
+- **multi-output regression** from T1 satellite-derived tabular features to T2 land-cover proportions
+- evaluation on both an in-period held-out split and a harder forward temporal split
+- a **file-based Streamlit dashboard** that visualizes predictions, labels, uncertainty, error summaries, and model comparison
 
-## 2. Project Framing
+## Updated Overview
 
-### Study area
-
-- City: **Nuremberg, Germany**
-- Geometry source:
-  - preferred: Nuremberg boundary file
-  - fallback used in code: a tighter Nuremberg bounding box if the exact boundary is missing
-
-### Temporal setup
-
-- `t1`: **2020**
-- `t2`: **2021**
-
-### Spatial unit
-
-- default grid size: **250m x 250m**
-- configurable through environment variable `GRID_SIZE_METERS`
-
-This was chosen because:
-
-- 10m pixel-level modeling is too noisy for a one-day tabular ML project
-- aggregated grid cells are easier to explain and evaluate
-- grid-level outputs fit the assignment’s focus on interpretable, responsible ML
-
-### Intended users
-
-- non-expert city stakeholders
-- students or public users exploring broad urban change patterns
-
-### Non-intended use
-
-The system must **not** be used for:
-
-- parcel-level planning
-- legal or regulatory decisions
-- property valuation
-- causal claims about why a specific place changed
-
-## 3. What We Predict
-
-For each grid cell, the system derives:
-
-### Land-cover composition labels
-
-- `built_up_prop`
-- `vegetation_prop`
-- `water_prop`
-- `other_prop`
-
-### Land-cover change labels
-
-- `delta_built_up`
-- `delta_vegetation`
-- `delta_water`
-- `delta_other`
-
-An additional `change_binary` label is derived as a simple helper target for change/no-change interpretation.
-
-## 4. Data Used
-
-### Mandatory data
-
-1. **Sentinel-2 L2A imagery**
-   - one product for **2020**
-   - one product for **2021**
-   - used to engineer spectral and index-based tabular features
-
-2. **ESA WorldCover**
-   - **2020**
-   - **2021**
-   - used as the main label source
-
-### Optional bonus data
-
-3. **OpenStreetMap context features**
-   - optional `.gpkg` or `.shp`
-   - used for:
-     - `road_density`
-     - `building_density`
-
-The OSM part is implemented as an optional extension and does not block the main workflow.
-
-## 5. How the Pipeline Works
-
-The project is intentionally structured as a simple end-to-end pipeline.
-
-### Step 1: Build the study grid
-
-- load Nuremberg geometry
-- create a regular grid over the study area
-- compute centroids for spatial splitting and mapping
-
-### Step 2: Build satellite features
-
-From Sentinel-2, the code extracts and aggregates:
-
-- band means and standard deviations for:
-  - `B02`
-  - `B03`
-  - `B04`
-  - `B08`
-  - `B11`
-  - `B12`
-- spectral indices:
-  - `NDVI`
-  - `NDBI`
-  - `NDWI`
-- brightness summary
-
-These are fixed-length tabular features, which satisfies the assignment constraint against CNN-style models.
-
-### Step 3: Build labels from ESA WorldCover
-
-WorldCover classes are grouped into:
+This project does **not** use CNNs, segmentation models, or spatial deep learning. Each row in the modeling dataset represents one stable **250 m x 250 m grid cell** with a `cell_id`. The model input is a fixed-length vector of spectral and index-based features derived from **Sentinel-2**. The target is a 4-part land-cover composition vector derived from **ESA WorldCover**:
 
 - `built_up`
 - `vegetation`
 - `water`
 - `other`
 
-The code computes class proportions inside each grid cell for each year.
+The current experimental setup is:
 
-### Step 4: Create the change dataset
+- `2019 -> 2020` for **train / validation / test**
+- `2020 -> 2021` for **forward external evaluation only**
 
-The `2020` and `2021` tables are joined by `cell_id`, then the code computes year-to-year deltas.
+Predictions are post-processed to remain valid proportions:
 
-### Step 5: Train two models
+- clipped to `[0, 1]`
+- row-normalized so the four outputs sum to `1`
 
-Required by the assignment:
+## Assignment Goal
 
-- **Elastic Net**
-  - interpretable baseline
-- **Random Forest**
-  - nonlinear tabular model
+The assignment asks for a model-based system that:
 
-### Step 6: Evaluate beyond accuracy
+- uses **satellite imagery** for at least two time periods
+- uses **ESA WorldCover** as the main source of land-cover labels
+- works with **tabular features**, not CNNs or end-to-end vision models
+- predicts **land-cover composition** and supports change analysis
+- evaluates models beyond plain accuracy
+- communicates **uncertainty**, **limitations**, and **trust** to non-experts
+- provides a working **interactive product**
 
-The code includes:
+This repository was built specifically around those requirements.
 
-- a **spatial hold-out split**
-- **MAE**
-- **RMSE**
-- **false change rate**
-- **stability score**
-- a **stress test** under noisy input features
+## Study Area and Grid
 
-### Step 7: Serve the results in a dashboard
+### Study area
 
-A **Streamlit** app displays:
+- City: **Nuremberg, Germany**
+- Geometry source:
+  - preferred: Nuremberg boundary file
+  - fallback in the original repo code: a tighter Nuremberg bounding box if the exact boundary is missing
 
-- the Nuremberg grid map
-- predicted change layers
-- uncertainty
-- explanation text
-- limitations text
+### Spatial unit
 
-## 6. Repository Structure
+- fixed analysis unit: **250 m x 250 m grid cells**
+- stable identifier: `cell_id`
+
+This aggregation level was chosen because it:
+
+- reduces pixel-level noise
+- keeps the problem in a tabular ML setting
+- makes outputs easier to summarize and explain
+- is practical for course-scale experimentation and dashboard visualization
+
+### Intended users
+
+- non-expert city stakeholders
+- students and instructors reviewing the workflow
+- public users exploring broad spatial patterns
+
+### Non-intended use
+
+The system should **not** be used for:
+
+- parcel-level planning
+- legal or regulatory decisions
+- property valuation
+- causal claims about why one specific location changed
+
+## Current End-to-End Workflow
+
+### Pipeline at a glance
 
 ```text
-Final_asmt/
-  data/
-    raw/
-    interim/
-    processed/
-  models/
-  reports/
-  src/
-    app/
-    data/
-    models/
-    utils/
-  README.md
-  requirements.txt
+Sentinel-2 + ESA WorldCover + Nuremberg boundary
+    -> annual preprocessing and compositing
+    -> 250 m grid aggregation
+    -> T1 tabular feature creation
+    -> T2 proportion label creation
+    -> temporal dataset assembly
+    -> multi-output regression training
+    -> in-period and forward evaluation
+    -> exported CSV / JSON artifacts
+    -> Streamlit dashboard
+```
+
+### Updated project pipeline
+
+1. Raw data are collected for Nuremberg.
+2. Sentinel-2 imagery is filtered by year and cloud conditions.
+3. Annual median composites are created.
+4. Spectral and index features are aggregated to stable 250 m cells.
+5. ESA WorldCover is grouped into four classes and converted to per-cell proportions.
+6. Temporal datasets are built for `2019 -> 2020` and `2020 -> 2021`.
+7. Multi-output regression models are trained on `2019 -> 2020` only.
+8. Performance is checked on a held-out in-period test split and a forward external split.
+9. Predictions, metrics, and summaries are exported to file-based artifacts.
+10. The Streamlit dashboard reads those artifacts and visualizes model behavior.
+
+## Data Sources
+
+### Sentinel-2
+
+- source: **`COPERNICUS/S2_SR_HARMONIZED`**
+- use in this project:
+  - annual feature generation for `2019` and `2020` inputs
+  - spectral and index-based tabular predictors
+
+### Sentinel-2 preprocessing
+
+The Earth Engine workflow is based on:
+
+- full-year filtering
+- cloud filtering
+- annual **median compositing**
+
+The current feature set is intentionally simple and tabular.
+
+### ESA WorldCover
+
+- **2020**: WorldCover **v100**
+- **2021**: WorldCover **v200**
+
+These layers are used to construct the target land-cover composition per grid cell.
+
+### Optional context data
+
+The original repository also contains optional OSM context-feature code for:
+
+- `road_density`
+- `building_density`
+
+That path is separate from the current Earth Engine temporal dataset workflow.
+
+## Feature Engineering
+
+The current T1 feature vector contains the following tabular predictors:
+
+- `B2`
+- `B3`
+- `B4`
+- `B8`
+- `B11`
+- `NDVI`
+- `NDWI`
+- `NDBI`
+
+These features are aggregated per 250 m grid cell, giving one fixed-length row per `cell_id`.
+
+The project deliberately avoids:
+
+- raw image patches
+- CNN feature extraction
+- spatial deep learning
+- any T2-derived predictors in the input feature set
+
+## Label Generation
+
+ESA WorldCover classes are grouped into four land-cover categories:
+
+- `vegetation`
+- `built_up`
+- `water`
+- `other`
+
+For each 250 m cell, the label is stored as a **proportion vector** whose components sum to approximately 1:
+
+- `vegetation_prop`
+- `built_up_prop`
+- `water_prop`
+- `other_prop`
+
+This turns the labeling problem into a mixed-land-cover composition task instead of a single dominant-class classification task.
+
+## Dataset Construction
+
+### Temporal datasets
+
+Two temporal datasets are used in the current pipeline:
+
+1. `2019 -> 2020`
+   - used for **train / validation / test**
+2. `2020 -> 2021`
+   - used only for **forward external evaluation**
+
+### Current dataset files
+
+The current Earth Engine-derived files in the repository include:
+
+- `data/processed_esa_ee/nuremberg_2019_features_250m.csv`
+- `data/processed_esa_ee/nuremberg_2020_composition_250m.csv`
+- `data/processed_esa_ee/nuremberg_2021_composition_250m.csv`
+- `data/train_esa_ee/nuremberg_2019_to_2020_model.csv`
+- `data/train_esa_ee/nuremberg_2020_to_2021_model.csv`
+
+### Current split convention
+
+For the `_ee` modeling pipeline, the final split is:
+
+- `80%` train
+- `10%` validation
+- `10%` test
+
+on the `2019 -> 2020` dataset.
+
+## Machine Learning Formulation
+
+### Problem type
+
+The current ML task is:
+
+- **multi-output regression**
+
+### Inputs and outputs
+
+- `X`: T1 tabular satellite-derived features only
+- `y`: T2 land-cover proportions
+
+For each row:
+
+- input year = earlier year (`2019` or `2020`)
+- output year = later year (`2020` or `2021`)
+
+### Target columns
+
+The target vector contains four outputs:
+
+- `vegetation_t2`
+- `built_up_t2`
+- `water_t2`
+- `other_t2`
+
+### Output constraints
+
+Because the outputs represent proportions, model predictions are post-processed by:
+
+1. clipping to `[0, 1]`
+2. row-normalizing to force the four outputs to sum to `1`
+
+This keeps prediction vectors interpretable as compositions.
+
+## Models Used
+
+The current `_ee` experiments include four tabular models:
+
+- **Elastic Net**
+- **Random Forest**
+- **XGBoost**
+- **MLP**
+
+### Role of each model
+
+- **Elastic Net**
+  - interpretable linear baseline
+  - coefficient export available
+- **Random Forest**
+  - nonlinear ensemble baseline
+  - feature importance export available
+  - uncertainty estimate from tree disagreement
+- **XGBoost**
+  - boosted tree model with stronger nonlinear capacity
+- **MLP**
+  - small tabular neural baseline using dense layers only
+  - still tabular, not image-based deep learning
+
+## Evaluation Strategy
+
+### In-period evaluation
+
+The first evaluation is performed on the held-out test split from:
+
+- `2019 -> 2020`
+
+This measures generalization to unseen rows from the same temporal transition.
+
+### Forward temporal evaluation
+
+The second evaluation is performed on:
+
+- `2020 -> 2021`
+
+This is the more realistic and harder evaluation because it tests **forward temporal generalization**.
+
+### Metrics
+
+The current `_ee` pipelines compute:
+
+- `MAE`
+- `RMSE`
+- `R²`
+
+for:
+
+- each class separately
+- overall macro-style summary across outputs
+
+### Why this matters
+
+A model can look strong on an in-period test split but still degrade badly on the forward split. This repository is designed to make that gap visible rather than hiding it.
+
+## Current Findings
+
+The current experiments show a consistent pattern:
+
+- nonlinear models perform better on the held-out in-period test split
+- forward temporal generalization is weaker across the board
+- **Elastic Net** is more interpretable and is relatively steadier forward than the stronger in-period nonlinear models
+- the project highlights the risk of **temporal overfitting** when training on a single-year transition only
+
+In short:
+
+- stronger in-sample performance does **not** automatically mean better forward-time robustness
+- temporal evaluation is necessary for a realistic interpretation of model quality
+
+## Streamlit Dashboard
+
+The dashboard lives in:
+
+- `src/app/app.py`
+
+### Current dashboard design
+
+The app is **file-based**, not a live inference service. It reads exported artifacts and visualizes:
+
+- predicted T2 composition
+- actual T2 composition labels
+- optional change views when the required T1 composition exists
+- selected model metrics
+- uncertainty summaries
+- error summaries
+- model comparison across splits
+
+### Current top layout
+
+The top visible section contains:
+
+- the left sidebar with controls and metrics
+- the predicted map panel
+- the actual labels map panel
+- the explanation panel
+
+### Analytical sections below the top view
+
+Below the top map-based section, the dashboard is being extended with additional analytical views such as:
+
+- **Land-Cover Composition Summary**
+- **Confidence / Uncertainty Analysis**
+- **Land-Cover Change Summary**
+- **Prediction Error Analysis**
+- **Model Comparison Across Splits**
+- **Dominant Land-Cover Summary**
+- **Download / Export**
+
+### Model comparison design
+
+The model comparison section is organized in this order:
+
+1. **category-wise comparison first**
+   - built_up
+   - vegetation
+   - water
+   - other
+2. **overall comparison second**
+   - overall R²
+   - overall MAE
+   - overall RMSE
+
+### Dashboard artifact files
+
+The dashboard currently expects file-based inputs such as:
+
+- `data/processed/app_predictions.csv`
+- `models/metrics.json`
+- `data/interim/grid.geojson`
+
+and, when needed for geometry compatibility with the Earth Engine grid:
+
+- `data/processed_esa_ee/nuremberg_2020_composition_250m.csv`
+- `data/processed_esa_ee/nuremberg_2021_composition_250m.csv`
+- `data/processed_esa_ee/nuremberg_2019_features_250m.csv`
+
+## Repository Structure
+
+```text
+.
+├── data/
+│   ├── raw/
+│   ├── interim/
+│   ├── processed/
+│   ├── processed_esa_ee/
+│   └── train_esa_ee/
+├── models/
+│   ├── elastic_net_ee/
+│   ├── random_forest_ee/
+│   ├── xgboost_ee/
+│   └── mlp_ee/
+├── reports/
+├── src/
+│   ├── app/
+│   ├── data/
+│   ├── models/
+│   └── utils/
+├── README.md
+└── requirements.txt
 ```
 
 ### Important folders
 
-- `src/data`
-  - data ingestion, grid construction, feature engineering, label generation
-- `src/models`
-  - training, evaluation, uncertainty
 - `src/app`
-  - Streamlit dashboard
+  - Streamlit dashboard, map utilities, explanation text, and analytical visualizations
+- `src/data`
+  - original grid-based feature engineering and label-generation pipeline
+- `src/models`
+  - original change-model code plus the current `_ee` training and export scripts
+- `src/utils`
+  - config, I/O helpers, and current `_ee` model configuration files
+- `data/processed_esa_ee`
+  - annual Earth Engine-derived grid-level features and label tables
+- `data/train_esa_ee`
+  - temporal training tables for `2019 -> 2020` and `2020 -> 2021`
+- `models/*_ee`
+  - trained model artifacts, prediction exports, and metrics for each model
 - `reports`
-  - report scaffold, reflection notes, checklist, demo script
+  - report scaffold, reflection notes, checklist, and demo script
 
-## 7. Raw Data Expectations
+## How to Run the Project
 
-The code supports either clean filenames or the original download names.
+Run everything from the project root.
 
-### Supported inputs
+### 1. Create and activate the environment
 
-- `data/raw/nuremberg_boundary.geojson`
-- `data/raw/worldcover_t1.tif`
-- `data/raw/worldcover_t2.tif`
-- `data/raw/sentinel_t1.tif`
-- `data/raw/sentinel_t2.tif`
+#### Ubuntu / Linux
 
-or the original downloaded forms:
-
-- `ESA_WorldCover_10m_2020_*_Map.tif`
-- `ESA_WorldCover_10m_2021_*_Map.tif`
-- Sentinel-2 `.SAFE` directories for `2020` and `2021`
-
-### Optional bonus input
-
-- an OSM `.gpkg` or `.shp` containing roads and/or buildings
-
-## 8. Setup and Run
-
-Run everything from the project root:
-
-`c:\Users\sayee\Documents\UTN_Sem3\ML\Final_asmt`
-
-### Create and activate environment
-
-```powershell
-C:\Users\sayee\AppData\Local\Programs\Python\Python311\python.exe -m venv .venv
-.\.venv\Scripts\activate.bat
-.\.venv\Scripts\python -m pip install -r requirements.txt
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-### Prepare the dataset
+#### Windows PowerShell
 
 ```powershell
-.\.venv\Scripts\python -m src.data.prepare_dataset
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-### Train the models
+### 2. Train the current `_ee` models
 
-```powershell
-.\.venv\Scripts\python -m src.models.train_all
+Examples:
+
+```bash
+python -m src.models.train_elastic_net_ee
+python -m src.models.train_random_forest_ee
+python -m src.models.train_xgboost_ee
+python -m src.models.train_mlp_ee
 ```
 
-### Launch the dashboard
+These scripts write artifacts under:
 
-```powershell
-.\.venv\Scripts\streamlit run src/app/app.py
+- `models/elastic_net_ee/`
+- `models/random_forest_ee/`
+- `models/xgboost_ee/`
+- `models/mlp_ee/`
+
+### 3. Build the dashboard exports
+
+```bash
+python -m src.models.export_app_artifacts
 ```
 
-### Optional: change grid resolution
+This writes:
 
-```powershell
-$env:GRID_SIZE_METERS="250"
-.\.venv\Scripts\python -m src.data.prepare_dataset
+- `data/processed/app_predictions.csv`
+- `models/metrics.json`
+
+### 4. Launch the Streamlit dashboard
+
+```bash
+streamlit run src/app/app.py
 ```
 
-## 9. Main Outputs
+## Original Repo Pipeline
 
-### Processed data
+The original repository pipeline is still present and useful for reference.
+
+### Original pipeline scripts
+
+- `src.data.prepare_dataset`
+- `src.models.train_all`
+
+### Original outputs
 
 - `data/processed/dataset_t1.csv`
 - `data/processed/dataset_t2.csv`
 - `data/processed/change_dataset.csv`
-- `data/processed/app_predictions.csv`
-
-### Interim geometry
-
-- `data/interim/grid.geojson`
-
-### Trained models
-
 - `models/elastic_net.joblib`
 - `models/random_forest.joblib`
+- `models/metrics.json` in the original scaffold setup
+
+That path is centered on **change prediction** and the earlier course scaffold, while the current `_ee` workflow is centered on **T1 -> T2 composition regression** and forward temporal evaluation.
+
+## Main Output Artifacts
+
+### Current Earth Engine model artifacts
+
+- `models/elastic_net_ee/elastic_net_model_ee.joblib`
+- `models/elastic_net_ee/elastic_net_test_predictions_ee.csv`
+- `models/elastic_net_ee/elastic_net_external_predictions_ee.csv`
+- `models/elastic_net_ee/elastic_net_metrics_ee.json`
+- `models/elastic_net_ee/elastic_net_coefficients_ee.csv`
+- `models/random_forest_ee/random_forest_model_ee.joblib`
+- `models/random_forest_ee/random_forest_test_predictions_ee.csv`
+- `models/random_forest_ee/random_forest_external_predictions_ee.csv`
+- `models/random_forest_ee/random_forest_metrics_ee.json`
+- `models/random_forest_ee/random_forest_feature_importances_ee.csv`
+- `models/xgboost_ee/xgboost_model_ee.joblib`
+- `models/xgboost_ee/xgboost_test_predictions_ee.csv`
+- `models/xgboost_ee/xgboost_external_predictions_ee.csv`
+- `models/xgboost_ee/xgboost_metrics_ee.json`
+- `models/xgboost_ee/xgboost_feature_importances_ee.csv`
+- `models/mlp_ee/mlp_model_ee.joblib`
+- `models/mlp_ee/mlp_test_predictions_ee.csv`
+- `models/mlp_ee/mlp_external_predictions_ee.csv`
+- `models/mlp_ee/mlp_metrics_ee.json`
+
+### Dashboard-ready exports
+
+- `data/processed/app_predictions.csv`
 - `models/metrics.json`
+- `data/interim/grid.geojson`
 
-## 10. How This Matches the Assignment
+## Current Limitations
 
-### Problem framing and scope
+- The project still depends on a **single-year transition** for training, which makes forward generalization difficult.
+- The `2019 -> 2020` test split is only a held-out subset, so those dashboard views are not full-city inference maps.
+- A full `2019` composition table is not currently present in the repository, which limits some change-mode views for the `test_2019_2020` split.
+- ESA WorldCover remains an imperfect proxy for ground truth.
+- Mixed cells and boundary cells remain noisy.
+- Temporal mismatch can still exist between annual labels and image compositing choices.
+- The dashboard is exploratory and educational, not an operational decision-support system.
 
-Covered by:
+## Future Improvements / Next Steps
 
-- this `README`
-- `reports/final_report_outline.md`
-- `reports/assignment_checklist.md`
+- add a full-city `2019 -> 2020` inference export for easier visual comparison
+- strengthen temporal robustness using more years or multi-transition training
+- improve uncertainty summaries and calibration analysis
+- add more careful treatment of mixed-cell uncertainty
+- continue dashboard polishing and reporting for the final course submission
 
-### Data exploration and reality check
-
-The project is designed to discuss at least these issues:
-
-- seasonal and acquisition effects
-- WorldCover label noise
-- spatial autocorrelation
-- mixed land-cover cells
-- possible geometry mismatch between imagery and labels
-
-One issue intentionally not fully fixed:
-
-- label noise at class boundaries and mixed cells
-
-### Modeling
-
-Satisfied by:
-
-- `ElasticNet`
-- `RandomForestRegressor`
-
-Both operate on tabular features only.
-
-### Evaluation beyond accuracy
-
-Satisfied by:
-
-- spatial hold-out split
-- regression metrics
-- false change rate
-- stability score
-- feature-noise stress test
-
-### Explainability and trust
-
-Satisfied by:
-
-- helpful explanation text in the app
-- misleading explanation example in the app
-- uncertainty estimate from tree disagreement
-- explicit limitations panel
-
-### Interactive product
-
-Satisfied by:
-
-- Streamlit dashboard in `src/app/app.py`
-
-### Mandatory ChatGPT reflection
-
-Prepared in:
-
-- `reports/chatgpt_reflection.md`
-- `reports/chatgpt_usage_log.md`
-
-## 11. Key Implementation Decisions
-
-These are the main project choices and why they were made.
-
-### Why tabular features instead of images directly?
-
-Because the assignment explicitly disallows CNNs and wants fixed-length features.
-
-### Why 2020 and 2021?
-
-Because ESA WorldCover is clearly available for both years and aligns well with the project scope.
-
-### Why 250m grid cells?
-
-Because this is a practical balance between:
-
-- too much noise at pixel level
-- too much smoothing at very coarse levels
-- runtime constraints for a one-day build
-
-### Why Elastic Net and Random Forest?
-
-Because together they provide:
-
-- one interpretable baseline
-- one stronger nonlinear model
-
-That directly satisfies the assignment.
-
-## 12. Known Limitations
-
-- Predictions are only as reliable as the input label quality.
-- WorldCover is not perfect ground truth.
-- Temporal mismatch can still exist between image acquisition dates and yearly land-cover labels.
-- The fallback Nuremberg bounding box is broader than an exact administrative boundary.
-- OSM features, if used, are static context features and not true time-aligned annual observations.
-- The dashboard supports broad interpretation, not precise operational decisions.
-
-## 13. Files for Submission Support
+## Files for Submission Support
 
 - `reports/final_report_outline.md`
 - `reports/assignment_checklist.md`
 - `reports/chatgpt_reflection.md`
 - `reports/chatgpt_usage_log.md`
 - `reports/demo_video_script.md`
-
-## 14. Current Status
-
-At this stage, the repository supports:
-
-- real data ingestion from your downloaded Sentinel-2 and WorldCover files
-- processed dataset generation
-- model training
-- metric export
-- dashboard prediction export
-- Streamlit app launch
-
-The remaining work for a final polished submission is mainly:
-
-- report writing
-- dashboard polishing
-- screenshots and demo recording
-- optional OSM bonus integration
