@@ -55,7 +55,7 @@ def _stop_with_file_error(path: Path, description: str, command: str | None = No
 
 def _load_grid() -> gpd.GeoDataFrame:
     if not GRID_PATH.exists():
-        _stop_with_file_error(GRID_PATH, "grid file")
+        _generate_grid()
 
     grid = gpd.read_file(GRID_PATH)
     if "cell_id" not in grid.columns:
@@ -63,6 +63,33 @@ def _load_grid() -> gpd.GeoDataFrame:
         st.stop()
     grid["cell_id"] = grid["cell_id"].astype(str)
     return grid.to_crs(4326)
+
+
+def _generate_grid() -> None:
+    """Generate grid.geojson from processed dataset if it doesn't exist."""
+    from shapely.geometry import box
+
+    GRID_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load processed dataset
+    dataset_path = PROCESSED_DIR / "dataset_2020.csv"
+    if not dataset_path.exists():
+        _stop_with_file_error(dataset_path, "dataset to generate grid from")
+
+    dataset = pd.read_csv(dataset_path)
+    grid_size = 250  # meters (GRID_SIZE_METERS)
+
+    grid_cells = []
+    for idx, row in dataset.iterrows():
+        cx = row["centroid_x"]
+        cy = row["centroid_y"]
+        half_size = grid_size / 2
+        cell = box(cx - half_size, cy - half_size, cx + half_size, cy + half_size)
+        grid_cells.append({"cell_id": row["cell_id"], "geometry": cell})
+
+    gdf = gpd.GeoDataFrame(grid_cells, crs="EPSG:32632")
+    gdf.to_file(GRID_PATH, driver="GeoJSON")
+    st.info(f"Generated grid with {len(gdf)} cells")
 
 
 def _load_prediction_grid() -> gpd.GeoDataFrame | None:
