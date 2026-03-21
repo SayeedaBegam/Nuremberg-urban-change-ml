@@ -28,7 +28,7 @@ from src.app.viz_utils import (
 from src.utils.config import INTERIM_DIR, MODELS_DIR, PROCESSED_DIR
 
 
-APP_PREDICTIONS_PATH = PROCESSED_DIR / "app_predictions.csv"
+APP_PREDICTIONS_PATH = PROCESSED_DIR / "app_predictions_combined.csv"
 METRICS_PATH = MODELS_DIR / "metrics.json"
 GRID_PATH = INTERIM_DIR / "grid.geojson"
 PROCESSED_EE_DIR = PROJECT_ROOT / "data" / "processed_esa_ee"
@@ -227,8 +227,12 @@ if prediction_grid is not None:
 available_models = sorted(predictions["model"].dropna().unique().tolist())
 available_splits = sorted(predictions["split"].dropna().unique().tolist())
 
-selected_model = st.sidebar.selectbox("Model", available_models)
-selected_split = st.sidebar.selectbox("Split", available_splits)
+# Single model: Enhanced RandomForest (2020→2021 prediction)
+selected_model = available_models[0] if available_models else "random_forest"
+selected_split = available_splits[0] if available_splits else "full_2020_2021_enhanced"
+
+st.sidebar.markdown(f"### Model: {selected_model}")
+st.sidebar.info("🎯 **Enhanced RandomForest** (R² = 0.968)\n\n2020 spectral features → 2021 change prediction")
 selected_layer_mode = st.sidebar.selectbox(
     "Layer mode",
     LAYER_MODES,
@@ -273,26 +277,113 @@ predicted_tooltip_columns = _build_tooltip_columns(merged, predicted_column, act
 legend_name = f"{selected_model} | {selected_split} | {selected_layer_mode} | {selected_class}"
 
 # Show map and explanation
-col1, col2 = st.columns([2, 1])
+# For change mode with actual data, show side-by-side comparison; otherwise show single map
+show_comparison = (selected_layer_mode == "change" and
+                   actual_column and
+                   actual_column in filtered_predictions.columns and
+                   filtered_predictions[actual_column].notna().any())
 
-with col1:
-    st.subheader("Predictions Map")
-    map_obj = build_map(
-        merged,
-        value_column=predicted_column,
-        tooltip_columns=predicted_tooltip_columns,
-        layer_mode=selected_layer_mode,
-        legend_name=legend_name,
-    )
-    st_folium(map_obj, width=900, height=600)
+if show_comparison:
+    # Calculate bounds to ensure both maps show the same area
+    plot_merged = merged.copy()
+    plot_merged[predicted_column] = pd.to_numeric(plot_merged[predicted_column], errors="coerce")
+    minx, miny, maxx, maxy = plot_merged.total_bounds
+    map_bounds = [[miny, minx], [maxy, maxx]]
 
-with col2:
-    st.subheader("Explanation")
-    st.write(helpful_explanation(selected_layer_mode, selected_class))
-    st.subheader("Potentially Misleading Explanation")
-    st.write(misleading_explanation())
-    st.subheader("Important Limitations")
-    st.write(limitations_text())
+    # Create tabs for uncertainty
+    tab1, tab2 = st.tabs(["📍 Change Maps", "📊 Prediction Uncertainty"])
+
+    with tab1:
+        col1, col2, col3 = st.columns([2.2, 2.2, 0.8])
+
+        with col1:
+            st.subheader("Predicted Change")
+            predicted_map = build_map(
+                merged,
+                value_column=predicted_column,
+                tooltip_columns=predicted_tooltip_columns,
+                layer_mode=selected_layer_mode,
+                legend_name=f"Predicted {selected_class} change",
+            )
+            predicted_map.fit_bounds(map_bounds)
+            st_folium(predicted_map, width=700, height=650)
+
+        with col2:
+            st.subheader("Actual Change")
+            actual_tooltip_columns = _build_tooltip_columns(merged, actual_column, predicted_column)
+            actual_map = build_map(
+                merged,
+                value_column=actual_column,
+                tooltip_columns=actual_tooltip_columns,
+                layer_mode=selected_layer_mode,
+                legend_name=f"Actual {selected_class} change",
+            )
+            actual_map.fit_bounds(map_bounds)
+            st_folium(actual_map, width=700, height=650)
+
+        with col3:
+            st.subheader("Explanation")
+            st.write(helpful_explanation(selected_layer_mode, selected_class))
+            st.subheader("Potentially Misleading Explanation")
+            st.write(misleading_explanation())
+            st.subheader("Important Limitations")
+            st.write(limitations_text())
+
+    with tab2:
+        st.subheader("Model Prediction Uncertainty")
+        if "uncertainty_built_up" in merged.columns:
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.write("**Uncertainty Map** - Shows where model is most confident (light) vs uncertain (dark)")
+                uncertainty_map = build_map(
+                    merged,
+                    value_column="uncertainty_built_up",
+                    tooltip_columns=["cell_id", "uncertainty_built_up", predicted_column],
+                    layer_mode="composition",  # Use composition colormap for uncertainty
+                    legend_name="Prediction Uncertainty",
+                )
+                uncertainty_map.fit_bounds(map_bounds)
+                st_folium(uncertainty_map, width=700, height=650)
+
+            with col2:
+                st.write("**Uncertainty Statistics**")
+                unc_stats = merged["uncertainty_built_up"].describe()
+                st.metric("Mean Uncertainty", f"{unc_stats['mean']:.4f}")
+                st.metric("Std Uncertainty", f"{unc_stats['std']:.4f}")
+                st.metric("Min Uncertainty", f"{unc_stats['min']:.4f}")
+                st.metric("Max Uncertainty", f"{unc_stats['max']:.4f}")
+
+                st.write("**Error vs Uncertainty Correlation**")
+                if actual_column and actual_column in merged.columns:
+                    merged[f"{actual_column}_clean"] = pd.to_numeric(merged[actual_column], errors="coerce")
+                    merged[f"{predicted_column}_clean"] = pd.to_numeric(merged[predicted_column], errors="coerce")
+                    merged["error"] = (merged[f"{predicted_column}_clean"] - merged[f"{actual_column}_clean"]).abs()
+                    corr = merged["uncertainty_built_up"].corr(merged["error"])
+                    st.metric("Correlation", f"{corr:.4f}", help="Higher = uncertainty aligns with error")
+        else:
+            st.info("Uncertainty data not available for this model/split combination")
+else:
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("Predictions Map")
+        map_obj = build_map(
+            merged,
+            value_column=predicted_column,
+            tooltip_columns=predicted_tooltip_columns,
+            layer_mode=selected_layer_mode,
+            legend_name=legend_name,
+        )
+        st_folium(map_obj, width=900, height=600)
+
+    with col2:
+        st.subheader("Explanation")
+        st.write(helpful_explanation(selected_layer_mode, selected_class))
+        st.subheader("Potentially Misleading Explanation")
+        st.write(misleading_explanation())
+        st.subheader("Important Limitations")
+        st.write(limitations_text())
 
 # Predictions vs Truth Analysis Tab
 st.markdown("---")
