@@ -25,6 +25,9 @@ GRID_SIZE_METERS = int(os.getenv("GRID_SIZE_METERS", "250"))
 RANDOM_STATE = 42
 NUREMBERG_BBOX_4326 = (10.97, 49.38, 11.15, 49.51)
 
+# Processed datasets use EPSG:3857 (Web Mercator) for centroid coordinates
+# Boundary uses EPSG:4326 (Lat/Lon)
+
 
 WORLD_COVER_MAPPING = {
     10: "vegetation",
