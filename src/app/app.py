@@ -87,7 +87,8 @@ def _generate_grid() -> None:
         cell = box(cx - half_size, cy - half_size, cx + half_size, cy + half_size)
         grid_cells.append({"cell_id": row["cell_id"], "geometry": cell})
 
-    gdf = gpd.GeoDataFrame(grid_cells, crs="EPSG:32632")
+    # Data is in Web Mercator (EPSG:3857), not UTM
+    gdf = gpd.GeoDataFrame(grid_cells, crs="EPSG:3857")
     gdf.to_file(GRID_PATH, driver="GeoJSON")
     st.info(f"Generated grid with {len(gdf)} cells")
 
