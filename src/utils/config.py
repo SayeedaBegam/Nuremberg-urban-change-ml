@@ -12,12 +12,12 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 
 
 RAW_PATHS = {
-    "boundary": RAW_DIR / "nuremberg_boundary.geojson",
-    "sentinel_t1": RAW_DIR / "sentinel_t1.tif",
-    "sentinel_t2": RAW_DIR / "sentinel_t2.tif",
-    "worldcover_t1": RAW_DIR / "worldcover_t1.tif",
-    "worldcover_t2": RAW_DIR / "worldcover_t2.tif",
-    "osm_context": RAW_DIR / "osm_context.gpkg",
+    "boundary": RAW_DIR / "/home/dk/Nuremberg-urban-change-ml/data/raw/nuremberg_boundary.geojson",
+    "sentinel_t1": RAW_DIR / "/home/dk/Nuremberg-urban-change-ml/data/raw/ESA_WorldCover_10m_2020_v100_N49E011_S2RGBNIR.tif",
+    "sentinel_t2": RAW_DIR / "/home/dk/Nuremberg-urban-change-ml/data/raw/ESA_WorldCover_10m_2021_v200_N49E011_S2RGBNIR.tif",
+    "worldcover_t1": RAW_DIR / "/home/dk/Nuremberg-urban-change-ml/data/raw/ESA_WorldCover_10m_2020_v100_N48E009_Map.tif",
+    "worldcover_t2": RAW_DIR / "/home/dk/Nuremberg-urban-change-ml/data/raw/ESA_WorldCover_10m_2021_v200_N48E009_Map.tif",
+    "osm_context": RAW_DIR / "",
 }
 
 
