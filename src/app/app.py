@@ -86,7 +86,7 @@ def _normalize_legacy_predictions(frame: pd.DataFrame) -> pd.DataFrame:
     if "model" not in normalized.columns:
         normalized["model"] = "random_forest"
     if "split" not in normalized.columns:
-        normalized["split"] = "legacy"
+        normalized["split"] = "test_2020_2021"
     return normalized
 
 
@@ -133,6 +133,25 @@ def _selected_columns(layer_mode: str, class_name: str) -> tuple[str, str | None
     if layer_mode == "composition":
         return f"pred_{class_name}_prop_t2", f"actual_{class_name}_prop_t2"
     return f"pred_delta_{class_name}", f"actual_delta_{class_name}"
+
+
+def _get_available_columns(frame: pd.DataFrame, class_name: str) -> tuple[str | None, str | None]:
+    """Get actual column names from dataframe, handling legacy formats."""
+    # Try predicted column formats
+    pred_col = None
+    for col_format in [
+        f"pred_delta_{class_name}_random_forest",
+        f"pred_delta_{class_name}_rf",
+        f"pred_delta_{class_name}",
+    ]:
+        if col_format in frame.columns:
+            pred_col = col_format
+            break
+
+    # Actual column is more standard
+    actual_col = f"actual_delta_{class_name}" if f"actual_delta_{class_name}" in frame.columns else None
+
+    return pred_col, actual_col
 
 
 def _metrics_for_selection(metrics: dict, model_name: str, split_name: str) -> tuple[dict, dict]:
@@ -210,7 +229,11 @@ available_splits = sorted(predictions["split"].dropna().unique().tolist())
 
 selected_model = st.sidebar.selectbox("Model", available_models)
 selected_split = st.sidebar.selectbox("Split", available_splits)
-selected_layer_mode = st.sidebar.selectbox("Layer mode", LAYER_MODES)
+selected_layer_mode = st.sidebar.selectbox(
+    "Layer mode",
+    LAYER_MODES,
+    index=1 if "change" in LAYER_MODES else 0  # Default to change mode
+)
 selected_class = st.sidebar.selectbox("Class", LAND_COVER_CLASSES)
 
 st.sidebar.markdown("### Limits")
@@ -219,7 +242,10 @@ st.sidebar.write(
 )
 
 best_params, split_metrics = _metrics_for_selection(metrics, selected_model, selected_split)
-_display_metrics(best_params, split_metrics, selected_class)
+
+# Only display metrics if they exist
+if split_metrics:
+    _display_metrics(best_params, split_metrics, selected_class)
 
 filtered_predictions = predictions[
     (predictions["model"] == selected_model) & (predictions["split"] == selected_split)
@@ -228,13 +254,15 @@ if filtered_predictions.empty:
     st.error("No rows matched the selected model and split.")
     st.stop()
 
-predicted_column, actual_column = _selected_columns(selected_layer_mode, selected_class)
-if selected_layer_mode == "change" and not _change_mode_available(filtered_predictions, predicted_column):
-    st.warning(
-        "Change mode is unavailable for this split because the required T1 composition columns are not present in the "
-        "exported artifacts. Composition mode is still available."
-    )
-    st.stop()
+if selected_layer_mode == "composition":
+    predicted_column = f"pred_{selected_class}_prop_t2"
+    actual_column = f"actual_{selected_class}_prop_t2"
+else:
+    # For change mode, use the helper function to find available columns
+    predicted_column, actual_column = _get_available_columns(filtered_predictions, selected_class)
+    if predicted_column is None:
+        st.error(f"No predicted delta columns found for {selected_class}.")
+        st.stop()
 
 if predicted_column not in filtered_predictions.columns:
     st.error(f"Missing value column `{predicted_column}` in `{APP_PREDICTIONS_PATH}`.")
@@ -243,66 +271,28 @@ if predicted_column not in filtered_predictions.columns:
 merged = grid.merge(filtered_predictions, on="cell_id", how="left")
 predicted_tooltip_columns = _build_tooltip_columns(merged, predicted_column, actual_column)
 legend_name = f"{selected_model} | {selected_split} | {selected_layer_mode} | {selected_class}"
-show_actual_composition = (
-    selected_layer_mode == "composition"
-    and actual_column is not None
-    and actual_column in merged.columns
-    and merged[actual_column].notna().any()
-)
 
-if show_actual_composition:
-    col1, col2, col3 = st.columns([1.35, 1.35, 1.0])
+# Show map and explanation
+col1, col2 = st.columns([2, 1])
 
-    with col1:
-        st.subheader("Predicted T2")
-        predicted_map = build_map(
-            merged,
-            value_column=predicted_column,
-            tooltip_columns=predicted_tooltip_columns,
-            layer_mode=selected_layer_mode,
-            legend_name=legend_name,
-        )
-        st_folium(predicted_map, width=650, height=600)
+with col1:
+    st.subheader("Predictions Map")
+    map_obj = build_map(
+        merged,
+        value_column=predicted_column,
+        tooltip_columns=predicted_tooltip_columns,
+        layer_mode=selected_layer_mode,
+        legend_name=legend_name,
+    )
+    st_folium(map_obj, width=900, height=600)
 
-    with col2:
-        st.subheader(_actual_map_title(selected_split))
-        actual_map = build_map(
-            merged,
-            value_column=actual_column,
-            tooltip_columns=_build_tooltip_columns(merged, actual_column),
-            layer_mode=selected_layer_mode,
-            legend_name=f"actual | {selected_split} | composition | {selected_class}",
-        )
-        st_folium(actual_map, width=650, height=600)
-
-    with col3:
-        st.subheader("Explanation")
-        st.write(helpful_explanation(selected_layer_mode, selected_class))
-        st.subheader("Potentially Misleading Explanation")
-        st.write(misleading_explanation())
-        st.subheader("Important Limitations")
-        st.write(limitations_text())
-else:
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader("Map")
-        map_obj = build_map(
-            merged,
-            value_column=predicted_column,
-            tooltip_columns=predicted_tooltip_columns,
-            layer_mode=selected_layer_mode,
-            legend_name=legend_name,
-        )
-        st_folium(map_obj, width=900, height=600)
-
-    with col2:
-        st.subheader("Explanation")
-        st.write(helpful_explanation(selected_layer_mode, selected_class))
-        st.subheader("Potentially Misleading Explanation")
-        st.write(misleading_explanation())
-        st.subheader("Important Limitations")
-        st.write(limitations_text())
+with col2:
+    st.subheader("Explanation")
+    st.write(helpful_explanation(selected_layer_mode, selected_class))
+    st.subheader("Potentially Misleading Explanation")
+    st.write(misleading_explanation())
+    st.subheader("Important Limitations")
+    st.write(limitations_text())
 
 # Predictions vs Truth Analysis Tab
 st.markdown("---")
