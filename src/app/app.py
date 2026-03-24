@@ -5,10 +5,13 @@ import sys
 from pathlib import Path
 
 import altair as alt
+import folium
 import geopandas as gpd
+import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
+from branca.colormap import LinearColormap
 from shapely.geometry import shape
 from sklearn.metrics import r2_score
 from streamlit_folium import st_folium
@@ -44,13 +47,14 @@ from src.app.viz_utils import (
     scatter_chart,
     compute_error_metrics,
 )
-from src.utils.config import INTERIM_DIR, MODELS_DIR, PROCESSED_DIR
+from src.utils.config import CHANGE_TARGET_COLUMNS, INTERIM_DIR, MODELS_DIR, PROCESSED_DIR
 
 
 APP_PREDICTIONS_PATH = PROCESSED_DIR / "app_predictions_combined.csv"
 METRICS_PATH = MODELS_DIR / "metrics.json"
 ENHANCED_METRICS_PATH = MODELS_DIR / "metrics_2020_2021_enhanced.json"
 CHANGE_DATASET_PATH = PROCESSED_DIR / "change_dataset_2020_2021.csv"
+ELASTIC_MODEL_PATH = MODELS_DIR / "elastic_net_2020_2021_enhanced.joblib"
 GRID_PATH = INTERIM_DIR / "grid.geojson"
 PROCESSED_EE_DIR = PROJECT_ROOT / "data" / "processed_esa_ee"
 PREDICTION_GRID_PATHS = [
@@ -215,6 +219,20 @@ def _load_predictions() -> pd.DataFrame:
 
     predictions["cell_id"] = predictions["cell_id"].astype(str)
     predictions = _compute_delta_columns(predictions)
+
+    # Add elastic_net rows from saved model artifact when available so model selection can switch between both.
+    reference_splits = tuple(sorted(predictions["split"].dropna().astype(str).unique().tolist()))
+    elastic_rows = _elastic_predictions_from_artifacts(reference_splits)
+    if not elastic_rows.empty:
+        elastic_rows["cell_id"] = elastic_rows["cell_id"].astype(str)
+        for column in predictions.columns:
+            if column not in elastic_rows.columns:
+                elastic_rows[column] = np.nan
+        for column in elastic_rows.columns:
+            if column not in predictions.columns:
+                predictions[column] = np.nan
+        predictions = pd.concat([predictions, elastic_rows[predictions.columns]], ignore_index=True)
+
     return prepare_dashboard_frame(predictions)
 
 
@@ -241,6 +259,51 @@ def _load_change_dataset() -> pd.DataFrame:
     if "cell_id" in frame.columns:
         frame["cell_id"] = frame["cell_id"].astype(str)
     return frame
+
+
+@st.cache_data(show_spinner=False)
+def _elastic_predictions_from_artifacts(reference_splits: tuple[str, ...]) -> pd.DataFrame:
+    if not ELASTIC_MODEL_PATH.exists():
+        return pd.DataFrame()
+
+    change_data = _load_change_dataset()
+    if change_data.empty:
+        return pd.DataFrame()
+
+    try:
+        from src.models.train_2020_2021_enhanced import _create_enhanced_features, _feature_columns
+    except Exception:
+        return pd.DataFrame()
+
+    feature_ready = _create_enhanced_features(change_data.copy())
+    feature_columns = [column for column in _feature_columns(feature_ready) if column in feature_ready.columns]
+    if not feature_columns:
+        return pd.DataFrame()
+
+    try:
+        model = joblib.load(ELASTIC_MODEL_PATH)
+        predictions = model.predict(feature_ready[feature_columns].fillna(0))
+    except Exception:
+        return pd.DataFrame()
+
+    pred_frame = pd.DataFrame(predictions, columns=CHANGE_TARGET_COLUMNS)
+    export = change_data[["cell_id"]].copy()
+
+    for target in CHANGE_TARGET_COLUMNS:
+        class_name = target.replace("delta_", "")
+        if target not in change_data.columns:
+            return pd.DataFrame()
+        export[f"actual_delta_{class_name}"] = pd.to_numeric(change_data[target], errors="coerce")
+        export[f"pred_delta_{class_name}"] = pd.to_numeric(pred_frame[target], errors="coerce")
+
+    if "centroid_x_t1" in change_data.columns:
+        export["centroid_x_t1"] = change_data["centroid_x_t1"]
+    if "centroid_y_t1" in change_data.columns:
+        export["centroid_y_t1"] = change_data["centroid_y_t1"]
+    export["uncertainty_built_up"] = np.nan
+    export["model"] = "elastic_net"
+    export["split"] = reference_splits[0] if reference_splits else "full_2020_2021_enhanced"
+    return export
 
 
 def _compute_delta_columns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -817,7 +880,48 @@ def _render_elastic_net_interpretability(selected_class: str, enhanced_metrics: 
         st.dataframe(ranking_table, use_container_width=True, hide_index=True)
 
 
-def _render_noise_stress_test(analysis: pd.DataFrame, merged: gpd.GeoDataFrame) -> None:
+def _build_square_noise_map(map_frame: gpd.GeoDataFrame, cell_radius: int) -> folium.Map:
+    valid = map_frame.dropna(subset=["noise_shift"]).copy()
+    if valid.empty:
+        raise ValueError("Noise shift map is empty.")
+
+    centers = valid.geometry.centroid
+    center_lat = float(centers.y.mean())
+    center_lon = float(centers.x.mean())
+    noise_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="cartodbpositron")
+
+    vmax = float(max(valid["noise_shift"].max(), 1e-6))
+    colormap = LinearColormap(
+        colors=["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"],
+        vmin=0.0,
+        vmax=vmax,
+    )
+    colormap.caption = "Noise impact | abs shift"
+    colormap.add_to(noise_map)
+
+    for row, center in zip(valid.itertuples(index=False), centers):
+        folium.RegularPolygonMarker(
+            location=[float(center.y), float(center.x)],
+            number_of_sides=4,
+            radius=cell_radius,
+            rotation=45,
+            color="#10223b",
+            weight=0.7,
+            fill=True,
+            fill_color=colormap(float(row.noise_shift)),
+            fill_opacity=0.92,
+            tooltip=f"cell_id: {row.cell_id} | noise_shift: {float(row.noise_shift):.4f}",
+        ).add_to(noise_map)
+
+    return noise_map
+
+
+def _render_noise_stress_test(
+    analysis: pd.DataFrame,
+    merged: gpd.GeoDataFrame,
+    change_data: pd.DataFrame,
+    enhanced_metrics: dict,
+) -> None:
     st.divider()
     st.header("Stress Test: Feature Noise Robustness")
     if analysis.empty:
@@ -825,34 +929,74 @@ def _render_noise_stress_test(analysis: pd.DataFrame, merged: gpd.GeoDataFrame) 
         return
 
     noise_level = st.slider("Noise level", min_value=0.0, max_value=0.35, value=0.08, step=0.01, key="stress_noise")
-    scenario = st.selectbox(
-        "Scenario",
-        ["All cells", "High uncertainty cells", "High-error cells"],
-        key="stress_scenario",
-    )
+    scenario = st.selectbox("Scenario", ["Single feature", "All features"], key="stress_scenario")
     score_metric = st.selectbox("Score metric", ["R2", "MAE"], key="stress_metric")
+    marker_radius = st.slider("Square cell radius", min_value=4, max_value=13, value=8, step=1, key="stress_marker_radius")
 
-    mask = np.ones(len(analysis), dtype=bool)
-    if scenario == "High uncertainty cells" and analysis["uncertainty"].notna().any():
-        threshold = float(analysis["uncertainty"].quantile(0.75))
-        mask = analysis["uncertainty"].fillna(-np.inf).to_numpy() >= threshold
-    elif scenario == "High-error cells":
-        threshold = float(analysis["abs_error"].quantile(0.75))
-        mask = analysis["abs_error"].to_numpy() >= threshold
+    feature_options: list[str] = []
+    if not change_data.empty:
+        metric_features = enhanced_metrics.get("features_used", [])
+        if isinstance(metric_features, list):
+            feature_options = [feature for feature in metric_features if feature in change_data.columns]
+        if not feature_options:
+            feature_options = [column for column in change_data.columns if column.endswith("_t1") or column.endswith("_t2")]
+
+    selected_feature = None
+    single_feature_table = pd.DataFrame()
+    if scenario == "Single feature":
+        if feature_options:
+            selected_feature = st.selectbox("Feature", feature_options, key="stress_single_feature")
+        else:
+            st.info("No feature columns available for single-feature stress testing. Falling back to all-features noise.")
+            scenario = "All features"
+
+    feature_weight = np.ones(len(analysis), dtype=float)
+    if scenario == "Single feature" and selected_feature and "cell_id" in change_data.columns:
+        lookup = change_data[["cell_id", selected_feature]].copy()
+        lookup["cell_id"] = lookup["cell_id"].astype(str)
+        joined = analysis[["cell_id"]].merge(lookup, on="cell_id", how="left")
+        feature_values = pd.to_numeric(joined[selected_feature], errors="coerce")
+        if feature_values.notna().any():
+            centered = feature_values - feature_values.mean()
+            scale = feature_values.std(ddof=0) + 1e-9
+            # Higher absolute standardized values get stronger perturbation in single-feature mode.
+            standardized = np.abs(centered / scale)
+            feature_weight = np.clip(standardized, 0.2, 2.8).fillna(1.0).to_numpy(dtype=float)
+            single_feature_table = pd.DataFrame(
+                {
+                    "cell_id": joined["cell_id"],
+                    "feature": selected_feature,
+                    "feature_value": feature_values,
+                    "feature_weight": feature_weight,
+                }
+            )
 
     rng = np.random.default_rng(42)
     predicted = analysis["predicted"].to_numpy(dtype=float)
     actual = analysis["actual"].to_numpy(dtype=float)
-    noisy_predicted = predicted.copy()
     std_base = float(np.std(predicted)) if len(predicted) else 0.0
     noise_std = max(std_base * noise_level, 1e-9)
-    noise = rng.normal(0.0, noise_std, size=int(mask.sum()))
-    noisy_predicted[mask] += noise
+    base_noise = rng.normal(0.0, noise_std, size=len(predicted))
+    if scenario == "Single feature":
+        noisy_predicted = predicted + base_noise * feature_weight
+    else:
+        noisy_predicted = predicted + base_noise
 
-    baseline_r2 = float(r2_score(actual, predicted))
-    noisy_r2 = float(r2_score(actual, noisy_predicted))
-    baseline_mae = float(np.mean(np.abs(predicted - actual)))
-    noisy_mae = float(np.mean(np.abs(noisy_predicted - actual)))
+    finite_mask = np.isfinite(actual) & np.isfinite(predicted) & np.isfinite(noisy_predicted)
+    if not finite_mask.all():
+        st.info(f"Filtered {int((~finite_mask).sum())} non-finite rows from stress-test scoring.")
+
+    metric_actual = actual[finite_mask]
+    metric_pred = predicted[finite_mask]
+    metric_noisy = noisy_predicted[finite_mask]
+    if len(metric_actual) < 2:
+        st.warning("Not enough valid rows to compute stress-test metrics after filtering non-finite values.")
+        return
+
+    baseline_r2 = float(r2_score(metric_actual, metric_pred))
+    noisy_r2 = float(r2_score(metric_actual, metric_noisy))
+    baseline_mae = float(np.mean(np.abs(metric_pred - metric_actual)))
+    noisy_mae = float(np.mean(np.abs(metric_noisy - metric_actual)))
 
     if score_metric == "R2":
         baseline_score = baseline_r2
@@ -882,16 +1026,16 @@ def _render_noise_stress_test(analysis: pd.DataFrame, merged: gpd.GeoDataFrame) 
     with lower[1]:
         map_frame = merged[["cell_id", "geometry"]].copy().merge(shift_frame, on="cell_id", how="left")
         if map_frame["noise_shift"].notna().any():
-            stress_map = build_map(
-                map_frame,
-                value_column="noise_shift",
-                tooltip_columns=["cell_id", "noise_shift"],
-                layer_mode="composition",
-                legend_name="Noise impact | abs shift",
-            )
+            stress_map = _build_square_noise_map(map_frame, cell_radius=marker_radius)
             st_folium(stress_map, width=520, height=330)
         else:
             st.info("Noise impact map is unavailable for this selection.")
+
+    if scenario == "Single feature" and selected_feature and not single_feature_table.empty:
+        table = single_feature_table.merge(shift_frame, on="cell_id", how="left")
+        table = table.sort_values("feature_weight", ascending=False).head(20).reset_index(drop=True)
+        st.subheader("Single Feature Stress Table")
+        st.dataframe(table, use_container_width=True, hide_index=True)
 
 
 def _render_model_comparison(metrics_payload: dict) -> pd.DataFrame:
@@ -1183,7 +1327,7 @@ analysis_frame = _build_analysis_frame(filtered_predictions, predicted_column, a
 _render_per_cell_change_analysis(filtered_predictions, selected_class, predicted_column, actual_column)
 _render_change_error_matrix(analysis_frame)
 _render_elastic_net_interpretability(selected_class, enhanced_metrics_payload, change_dataset)
-_render_noise_stress_test(analysis_frame, merged)
+_render_noise_stress_test(analysis_frame, merged, change_dataset, enhanced_metrics_payload)
 
 # Compact metrics section to avoid image-cache warnings from large static matplotlib renders.
 st.markdown("---")
