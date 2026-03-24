@@ -1,0 +1,278 @@
+Section1:
+// ================================
+// 1. LOAD BOUNDARY
+// ================================
+var nuremberg = ee.FeatureCollection(
+  "projects/study-nuremberg-data/assets/nuremberg_boundary"
+);
+
+Map.centerObject(nuremberg, 11);
+Map.addLayer(nuremberg, {color: 'red'}, "Boundary");
+
+// ================================
+// 2. DEFINE REFERENCE CENTER
+// ================================
+var boundaryCentroid = nuremberg.geometry().centroid(1);
+Map.addLayer(boundaryCentroid, {color: 'blue'}, "Boundary centroid");
+
+// ================================
+// 3. CREATE 250m GRID + ID + LOCATION FEATURE
+// ================================
+var gridSize = 250;
+
+var grid = nuremberg.geometry().coveringGrid({
+  proj: ee.Projection('EPSG:3857'),
+  scale: gridSize
+});
+
+grid = grid.map(function(f) {
+  var cellCentroid = f.geometry().centroid(1);
+  var dist = cellCentroid.distance(boundaryCentroid, 1);
+  return f.set({
+    cell_id: f.id(),
+    distance_to_boundary_centroid: dist
+  });
+});
+
+Map.addLayer(grid, {color: 'yellow'}, "Grid");
+
+// ================================
+// 4. SENTINEL-2 COLLECTION (2021)
+// ================================
+var s2col = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+  .filterBounds(nuremberg)
+  .filterDate("2021-01-01", "2021-12-31")
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20));
+
+// ================================
+// 5. ADD DERIVED FEATURES PER IMAGE
+// ================================
+var addDerived = function(img) {
+  var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var ndwi = img.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  var ndbi = img.normalizedDifference(['B11', 'B8']).rename('NDBI');
+  var mndwi = img.normalizedDifference(['B3', 'B11']).rename('MNDWI');
+
+  var bsi = img.expression(
+    '((SWIR + RED) - (NIR + BLUE)) / ((SWIR + RED) + (NIR + BLUE))',
+    {
+      SWIR: img.select('B11'),
+      RED: img.select('B4'),
+      NIR: img.select('B8'),
+      BLUE: img.select('B2')
+    }
+  ).rename('BSI');
+
+  var brightness = img.expression(
+    '(B3 + B4 + B8 + B11) / 4',
+    {
+      B3: img.select('B3'),
+      B4: img.select('B4'),
+      B8: img.select('B8'),
+      B11: img.select('B11')
+    }
+  ).rename('brightness');
+
+  return img.addBands([ndvi, ndwi, ndbi, mndwi, bsi, brightness]);
+};
+
+var s2Derived = s2col.map(addDerived);
+
+// ================================
+// 6. YEARLY MEDIAN COMPOSITE
+// ================================
+var s2 = s2Derived.median().clip(nuremberg);
+
+Map.addLayer(s2, {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000
+}, "Sentinel-2 RGB 2021");
+
+// ================================
+// 7. YEARLY VARIABILITY FEATURES
+// ================================
+var ndviStd = s2Derived.select('NDVI')
+  .reduce(ee.Reducer.stdDev())
+  .rename('NDVI_std');
+
+var ndbiStd = s2Derived.select('NDBI')
+  .reduce(ee.Reducer.stdDev())
+  .rename('NDBI_std');
+
+s2 = s2.addBands([ndviStd, ndbiStd]);
+
+// ================================
+// 8. OPTIONAL VISUALIZATION
+// ================================
+Map.addLayer(s2.select('NDVI'), {
+  min: -1, max: 1, palette: ['blue', 'white', 'green']
+}, "NDVI 2021");
+
+Map.addLayer(s2.select('MNDWI'), {
+  min: -1, max: 1, palette: ['brown', 'white', 'blue']
+}, "MNDWI 2021");
+
+Map.addLayer(s2.select('BSI'), {
+  min: -1, max: 1, palette: ['black', 'white', 'orange']
+}, "BSI 2021");
+
+// ================================
+// 9. SELECT FEATURES
+// ================================
+var featuresImage = s2.select([
+  'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11',
+  'NDVI', 'NDWI', 'NDBI', 'MNDWI', 'BSI', 'brightness',
+  'NDVI_std', 'NDBI_std'
+]);
+
+// ================================
+// 10. AGGREGATE FEATURES TO GRID
+// ================================
+var featureTable = featuresImage.reduceRegions({
+  collection: grid,
+  reducer: ee.Reducer.mean(),
+  scale: 10
+});
+
+// ================================
+// 11. CLEAN
+// ================================
+var cleanedFeatures = featureTable
+  .filter(ee.Filter.notNull(['NDVI']))
+  .select([
+    'cell_id',
+    'distance_to_boundary_centroid',
+    'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11',
+    'NDVI', 'NDWI', 'NDBI', 'MNDWI', 'BSI', 'brightness',
+    'NDVI_std', 'NDBI_std'
+  ]);
+
+// Light preview only
+print("2021 features task prepared");
+
+// ================================
+// 12. EXPORT
+// ================================
+Export.table.toDrive({
+  collection: cleanedFeatures,
+  description: "nuremberg_2021_features_plus_location_250m",
+  fileFormat: "CSV"
+});
+
+
+Section 2:
+
+// ================================
+// 1. LOAD BOUNDARY
+// ================================
+var nuremberg = ee.FeatureCollection(
+  "projects/study-nuremberg-data/assets/nuremberg_boundary"
+);
+
+Map.centerObject(nuremberg, 11);
+Map.addLayer(nuremberg, {color: 'red'}, "Boundary");
+
+// ================================
+// 2. CREATE SAME 250m GRID + ID
+// ================================
+var gridSize = 250;
+
+var grid = nuremberg.geometry().coveringGrid({
+  proj: ee.Projection('EPSG:3857'),
+  scale: gridSize
+});
+
+grid = grid.map(function(f) {
+  return f.set('cell_id', f.id());
+});
+
+Map.addLayer(grid, {color: 'yellow'}, "Grid");
+
+// ================================
+// 3. LOAD ESA WORLDCOVER 2021
+// ================================
+var wc2021 = ee.Image("ESA/WorldCover/v200/2021")
+  .clip(nuremberg);
+
+Map.addLayer(wc2021, {
+  min: 10,
+  max: 100,
+  palette: [
+    '#006400', '#ffbb22', '#ffff4c', '#f096ff', '#fa0000',
+    '#b4b4b4', '#f0f0f0', '#0064c8', '#0096a0', '#00cf75', '#fae6a0'
+  ]
+}, "ESA WorldCover 2021");
+
+// ================================
+// 4. CLASS HISTOGRAM PER CELL
+// ================================
+var labelTable = wc2021.reduceRegions({
+  collection: grid,
+  reducer: ee.Reducer.frequencyHistogram(),
+  scale: 10
+});
+
+// ================================
+// 5. GROUPED LABELS FROM COUNTS
+// ================================
+var groupedLabels = labelTable.map(function(f) {
+  var hist = ee.Dictionary(
+    ee.Algorithms.If(f.get('histogram'), f.get('histogram'), ee.Dictionary({}))
+  );
+
+  var count10 = ee.Number(hist.get('10', 0));
+  var count20 = ee.Number(hist.get('20', 0));
+  var count30 = ee.Number(hist.get('30', 0));
+  var count40 = ee.Number(hist.get('40', 0));
+  var count50 = ee.Number(hist.get('50', 0));
+  var count60 = ee.Number(hist.get('60', 0));
+  var count70 = ee.Number(hist.get('70', 0));
+  var count80 = ee.Number(hist.get('80', 0));
+  var count90 = ee.Number(hist.get('90', 0));
+  var count95 = ee.Number(hist.get('95', 0));
+  var count100 = ee.Number(hist.get('100', 0));
+
+  var vegetationCount = count10.add(count20).add(count30).add(count40);
+  var builtUpCount = count50;
+  var waterCount = count80;
+  var otherCount = count60.add(count70).add(count90).add(count95).add(count100);
+
+  var total = vegetationCount
+    .add(builtUpCount)
+    .add(waterCount)
+    .add(otherCount);
+
+  var vegetation = ee.Number(
+    ee.Algorithms.If(total.gt(0), vegetationCount.divide(total), 0)
+  );
+  var built_up = ee.Number(
+    ee.Algorithms.If(total.gt(0), builtUpCount.divide(total), 0)
+  );
+  var water = ee.Number(
+    ee.Algorithms.If(total.gt(0), waterCount.divide(total), 0)
+  );
+  var other = ee.Number(
+    ee.Algorithms.If(total.gt(0), otherCount.divide(total), 0)
+  );
+
+  return ee.Feature(null, {
+    cell_id: f.get('cell_id'),
+    vegetation: vegetation,
+    built_up: built_up,
+    water: water,
+    other: other
+  });
+});
+
+// Light preview only
+print("2021 labels task prepared");
+
+// ================================
+// 6. EXPORT
+// ================================
+Export.table.toDrive({
+  collection: groupedLabels,
+  description: "nuremberg_2021_labels_grouped_250m",
+  fileFormat: "CSV"
+});
