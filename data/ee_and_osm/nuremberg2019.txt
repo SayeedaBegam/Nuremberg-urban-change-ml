@@ -1,0 +1,102 @@
+// ================================
+// 1. LOAD BOUNDARY
+// ================================
+var nuremberg = ee.FeatureCollection(
+  "projects/study-nuremberg-data/assets/nuremberg_boundary"
+);
+
+Map.centerObject(nuremberg, 11);
+Map.addLayer(nuremberg, {color: 'red'}, "Boundary");
+
+// ================================
+// 2. CREATE 250m GRID + ID
+// ================================
+var gridSize = 250;
+
+var grid = nuremberg.geometry().coveringGrid({
+  proj: ee.Projection('EPSG:3857'),
+  scale: gridSize
+});
+
+grid = grid.map(function(f) {
+  return f.set('cell_id', f.id());
+});
+
+Map.addLayer(grid, {color: 'yellow'}, "Grid");
+
+// ================================
+// 3. SENTINEL-2 (2019)
+// ================================
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+  .filterBounds(nuremberg)
+  .filterDate("2019-01-01", "2019-12-31")
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+  .median()
+  .clip(nuremberg);
+
+// RGB visualization
+Map.addLayer(s2, {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000
+}, "Sentinel-2 RGB 2019");
+
+// ================================
+// 4. ADD INDICES
+// ================================
+var addIndices = function(img) {
+  var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var ndwi = img.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  var ndbi = img.normalizedDifference(['B11', 'B8']).rename('NDBI');
+  return img.addBands([ndvi, ndwi, ndbi]);
+};
+
+s2 = addIndices(s2);
+
+// Optional visualization
+Map.addLayer(s2.select('NDVI'), {min: -1, max: 1, palette: ['blue', 'white', 'green']}, "NDVI 2019");
+Map.addLayer(s2.select('NDWI'), {min: -1, max: 1, palette: ['brown', 'white', 'blue']}, "NDWI 2019");
+Map.addLayer(s2.select('NDBI'), {min: -1, max: 1, palette: ['green', 'white', 'red']}, "NDBI 2019");
+
+// ================================
+// 5. SELECT FEATURES
+// ================================
+var featuresImage = s2.select([
+  'B2', 'B3', 'B4', 'B8', 'B11',
+  'NDVI', 'NDWI', 'NDBI'
+]);
+
+// ================================
+// 6. AGGREGATE FEATURES TO GRID
+// ================================
+var featureTable = featuresImage.reduceRegions({
+  collection: grid,
+  reducer: ee.Reducer.mean(),
+  scale: 10
+});
+
+// ================================
+// 7. CLEAN
+// ================================
+var cleanedFeatures = featureTable
+  .filter(ee.Filter.notNull(['NDVI']))
+  .select([
+    'cell_id',
+    'B2', 'B3', 'B4', 'B8', 'B11',
+    'NDVI', 'NDWI', 'NDBI'
+  ]);
+
+// ================================
+// 8. PREVIEW
+// ================================
+print("Sample 2019 features", cleanedFeatures.limit(10));
+print("Properties", cleanedFeatures.first().propertyNames());
+
+// ================================
+// 9. EXPORT
+// ================================
+Export.table.toDrive({
+  collection: cleanedFeatures,
+  description: "nuremberg_2019_features_250m",
+  fileFormat: "CSV"
+});

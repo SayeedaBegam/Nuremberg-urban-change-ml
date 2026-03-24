@@ -1,0 +1,184 @@
+// ================================
+// 1. LOAD BOUNDARY
+// ================================
+var nuremberg = ee.FeatureCollection(
+  "projects/study-nuremberg-data/assets/nuremberg_boundary"
+);
+
+Map.centerObject(nuremberg, 11);
+Map.addLayer(nuremberg, {color: 'red'}, "Boundary");
+
+// ================================
+// 2. DEFINE REFERENCE CENTER
+// ================================
+// Safer name than "city center"
+var boundaryCentroid = nuremberg.geometry().centroid(1);
+Map.addLayer(boundaryCentroid, {color: 'blue'}, "Boundary centroid");
+
+// ================================
+// 3. CREATE 250m GRID + ID + LOCATION FEATURE
+// ================================
+var gridSize = 250;
+
+var grid = nuremberg.geometry().coveringGrid({
+  proj: ee.Projection('EPSG:3857'),
+  scale: gridSize
+});
+
+grid = grid.map(function(f) {
+  var cellCentroid = f.geometry().centroid(1);
+  var dist = cellCentroid.distance(boundaryCentroid, 1);
+  return f.set({
+    cell_id: f.id(),
+    distance_to_boundary_centroid: dist
+  });
+});
+
+Map.addLayer(grid, {color: 'yellow'}, "Grid");
+
+// ================================
+// 4. SENTINEL-2 COLLECTION (2019)
+// ================================
+var s2col = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+  .filterBounds(nuremberg)
+  .filterDate("2019-01-01", "2019-12-31")
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20));
+
+// ================================
+// 5. ADD DERIVED FEATURES PER IMAGE
+// ================================
+var addDerived = function(img) {
+  var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var ndwi = img.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  var ndbi = img.normalizedDifference(['B11', 'B8']).rename('NDBI');
+  var mndwi = img.normalizedDifference(['B3', 'B11']).rename('MNDWI');
+
+  var bsi = img.expression(
+    '((SWIR + RED) - (NIR + BLUE)) / ((SWIR + RED) + (NIR + BLUE))',
+    {
+      SWIR: img.select('B11'),
+      RED: img.select('B4'),
+      NIR: img.select('B8'),
+      BLUE: img.select('B2')
+    }
+  ).rename('BSI');
+
+  var brightness = img.expression(
+    '(B3 + B4 + B8 + B11) / 4',
+    {
+      B3: img.select('B3'),
+      B4: img.select('B4'),
+      B8: img.select('B8'),
+      B11: img.select('B11')
+    }
+  ).rename('brightness');
+
+  return img.addBands([ndvi, ndwi, ndbi, mndwi, bsi, brightness]);
+};
+
+var s2Derived = s2col.map(addDerived);
+
+// ================================
+// 6. YEARLY MEDIAN COMPOSITE
+// ================================
+var s2 = s2Derived.median().clip(nuremberg);
+
+// RGB visualization
+Map.addLayer(s2, {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000
+}, "Sentinel-2 RGB 2019");
+
+// ================================
+// 7. YEARLY VARIABILITY FEATURES
+// ================================
+var ndviStd = s2Derived.select('NDVI')
+  .reduce(ee.Reducer.stdDev())
+  .rename('NDVI_std');
+
+var ndbiStd = s2Derived.select('NDBI')
+  .reduce(ee.Reducer.stdDev())
+  .rename('NDBI_std');
+
+s2 = s2.addBands([ndviStd, ndbiStd]);
+
+// ================================
+// 8. OPTIONAL VISUALIZATION
+// ================================
+Map.addLayer(s2.select('NDVI'), {
+  min: -1, max: 1, palette: ['blue', 'white', 'green']
+}, "NDVI 2019");
+
+Map.addLayer(s2.select('MNDWI'), {
+  min: -1, max: 1, palette: ['brown', 'white', 'blue']
+}, "MNDWI 2019");
+
+Map.addLayer(s2.select('BSI'), {
+  min: -1, max: 1, palette: ['black', 'white', 'orange']
+}, "BSI 2019");
+
+// ================================
+// 9. SELECT FEATURES
+// ================================
+var featuresImage = s2.select([
+  'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11',
+  'NDVI', 'NDWI', 'NDBI', 'MNDWI', 'BSI', 'brightness',
+  'NDVI_std', 'NDBI_std'
+]);
+
+// ================================
+// 10. AGGREGATE FEATURES TO GRID
+// ================================
+var featureTable = featuresImage.reduceRegions({
+  collection: grid,
+  reducer: ee.Reducer.mean(),
+  scale: 10
+});
+
+// ================================
+// 11. CLEAN
+// ================================
+var cleanedFeatures = featureTable
+  .filter(ee.Filter.notNull(['NDVI']))
+  .select([
+    'cell_id',
+    'distance_to_boundary_centroid',
+    'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11',
+    'NDVI', 'NDWI', 'NDBI', 'MNDWI', 'BSI', 'brightness',
+    'NDVI_std', 'NDBI_std'
+  ]);
+
+// ================================
+// 12. PREVIEW
+// ================================
+print("Updated 2019 features", cleanedFeatures.limit(10));
+print("Properties", cleanedFeatures.first().propertyNames());
+
+// ================================
+// 13. EXPORT FEATURE CSV
+// ================================
+Export.table.toDrive({
+  collection: cleanedFeatures,
+  description: "nuremberg_2019_features_plus_location_250m",
+  fileFormat: "CSV"
+});
+
+// ================================
+// 14. EXPORT GRID AS WGS84 GEOJSON
+// ================================
+var gridExport = grid.map(function(f) {
+  return ee.Feature(
+    f.geometry().transform('EPSG:4326', 1),
+    {
+      cell_id: f.get('cell_id'),
+      distance_to_boundary_centroid: f.get('distance_to_boundary_centroid')
+    }
+  );
+});
+
+Export.table.toDrive({
+  collection: gridExport,
+  description: "nuremberg_grid_250m_wgs84",
+  fileFormat: "GeoJSON"
+});

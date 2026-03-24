@@ -1,0 +1,325 @@
+// ================================
+// 1. LOAD BOUNDARY
+// ================================
+var nuremberg = ee.FeatureCollection(
+  "projects/study-nuremberg-data/assets/nuremberg_boundary"
+);
+
+Map.centerObject(nuremberg, 11);
+Map.addLayer(nuremberg, {color: 'red'}, "Boundary");
+
+// ================================
+// 2. CREATE 250m GRID + ID
+// ================================
+var gridSize = 250;
+
+var grid = nuremberg.geometry().coveringGrid({
+  proj: ee.Projection('EPSG:3857'),
+  scale: gridSize
+});
+
+// Add stable cell_id
+grid = grid.map(function(f) {
+  return f.set('cell_id', f.id());
+});
+
+Map.addLayer(grid, {color: 'yellow'}, "Grid");
+
+// ================================
+// 3. SENTINEL-2 (2020)
+// ================================
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+  .filterBounds(nuremberg)
+  .filterDate("2020-01-01", "2020-12-31")
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+  .median()
+  .clip(nuremberg);
+
+// RGB
+Map.addLayer(s2, {
+  bands: ['B4','B3','B2'],
+  min: 0,
+  max: 3000
+}, "Sentinel-2 RGB");
+
+// ================================
+// 4. ADD INDICES
+// ================================
+var addIndices = function(img) {
+  var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var ndwi = img.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  var ndbi = img.normalizedDifference(['B11', 'B8']).rename('NDBI');
+  return img.addBands([ndvi, ndwi, ndbi]);
+};
+
+s2 = addIndices(s2);
+
+// Visualize indices
+Map.addLayer(s2.select('NDVI'), {min:-1,max:1,palette:['blue','white','green']}, "NDVI");
+Map.addLayer(s2.select('NDWI'), {min:-1,max:1,palette:['brown','white','blue']}, "NDWI");
+Map.addLayer(s2.select('NDBI'), {min:-1,max:1,palette:['green','white','red']}, "NDBI");
+
+// ================================
+// 5. SELECT FEATURES
+// ================================
+var featuresImage = s2.select([
+  'B2', 'B3', 'B4', 'B8', 'B11',
+  'NDVI', 'NDWI', 'NDBI'
+]);
+
+// ================================
+// 6. ESA WORLDCOVER
+// ================================
+var wc2020 = ee.Image("ESA/WorldCover/v100/2020")
+  .clip(nuremberg);
+
+// ESA visualization
+Map.addLayer(wc2020, {
+  min: 10,
+  max: 100,
+  palette: [
+    '#006400','#ffbb22','#ffff4c','#f096ff','#fa0000',
+    '#b4b4b4','#f0f0f0','#0064c8','#0096a0','#00cf75','#fae6a0'
+  ]
+}, "ESA WorldCover");
+
+// ================================
+// 7. FEATURE AGGREGATION
+// ================================
+var featureTable = featuresImage.reduceRegions({
+  collection: grid,
+  reducer: ee.Reducer.mean(),
+  scale: 10
+});
+
+// ================================
+// 8. LABEL HISTOGRAM
+// ================================
+var labelTable = wc2020.reduceRegions({
+  collection: grid,
+  reducer: ee.Reducer.frequencyHistogram(),
+  scale: 10
+});
+
+// ================================
+// 9. LABEL PROPORTIONS (GROUPED)
+// ================================
+var labelProportions = labelTable.map(function(f) {
+
+  var hist = ee.Dictionary(f.get('histogram'));
+
+  var total = ee.Number(
+    ee.Algorithms.If(
+      hist,
+      hist.values().reduce(ee.Reducer.sum()),
+      0
+    )
+  );
+
+  var proportions = ee.Dictionary(
+    ee.Algorithms.If(
+      total.gt(0),
+      hist.map(function(key, value) {
+        return ee.Number(value).divide(total);
+      }),
+      {}
+    )
+  );
+
+  var vegetation = ee.Number(proportions.get('10', 0))
+  .add(ee.Number(proportions.get('20', 0)))
+  .add(ee.Number(proportions.get('30', 0)))
+  .add(ee.Number(proportions.get('40', 0)));
+
+  var built_up = ee.Number(proportions.get('50', 0));
+  var water = ee.Number(proportions.get('80', 0));
+
+  var other = ee.Number(1)
+    .subtract(vegetation)
+    .subtract(built_up)
+    .subtract(water);
+
+  return f.set({
+    cell_id: f.get('cell_id'),
+    vegetation: vegetation,
+    built_up: built_up,
+    water: water,
+    other: other
+  });
+});
+
+// ================================
+// 🔍 VISUALIZATION
+// ================================
+var vegImage = labelProportions.reduceToImage({
+  properties: ['vegetation'],
+  reducer: ee.Reducer.first()
+});
+
+Map.addLayer(vegImage, {min:0, max:1, palette:['white','green']}, "Vegetation %");
+
+// ================================
+// 10. MERGE (FIXED)
+// ================================
+// var finalDataset = featureTable.map(function(f) {
+
+//   var geom = f.geometry();
+
+//   var labelFeature = labelProportions
+//     .filterBounds(geom)
+//     .first();
+
+//   return ee.Feature(
+//     ee.Algorithms.If(
+//       labelFeature,
+//       f.copyProperties(labelFeature),
+//       f
+//     )
+//   );
+// });
+
+// var finalDataset = featureTable.map(function(f) {
+
+//   var geom = f.geometry();
+
+//   var labelFeature = labelProportions
+//     .filterBounds(geom)
+//     .first();
+
+//   return ee.Feature(
+//     ee.Algorithms.If(
+//       labelFeature,
+//       f.copyProperties(labelFeature),
+//       f.set({
+//         vegetation: 0,
+//         built_up: 0,
+//         water: 0,
+//         other: 0
+//       })
+//     )
+//   );
+// });
+
+// var finalDataset = featureTable.map(function(f) {
+
+//   var geom = f.geometry();
+
+//   var labelFeature = labelProportions
+//     .filterBounds(geom)
+//     .first();
+
+//   var base = ee.Feature(f);
+
+//   var withLabels = ee.Feature(
+//     ee.Algorithms.If(
+//       labelFeature,
+//       base.copyProperties(labelFeature),
+//       base
+//     )
+//   );
+
+//   // FORCE all columns to exist
+//   return withLabels.set({
+//     vegetation: ee.Number(
+//       ee.Algorithms.If(withLabels.get('vegetation'), withLabels.get('vegetation'), 0)
+//     ),
+//     built_up: ee.Number(
+//       ee.Algorithms.If(withLabels.get('built_up'), withLabels.get('built_up'), 0)
+//     ),
+//     water: ee.Number(
+//       ee.Algorithms.If(withLabels.get('water'), withLabels.get('water'), 0)
+//     ),
+//     other: ee.Number(
+//       ee.Algorithms.If(withLabels.get('other'), withLabels.get('other'), 0)
+//     )
+//   });
+// });
+
+var finalDataset = featureTable.map(function(f) {
+
+  var geom = f.geometry();
+
+  var labelFeature = labelProportions
+    .filterBounds(geom)
+    .first();
+
+  var withLabels = ee.Feature(
+    ee.Algorithms.If(
+      labelFeature,
+      f.copyProperties(labelFeature),
+      f
+    )
+  );
+
+  return withLabels.set({
+    vegetation: ee.Number(
+      ee.Algorithms.If(withLabels.get('vegetation'), withLabels.get('vegetation'), 0)
+    ),
+    built_up: ee.Number(
+      ee.Algorithms.If(withLabels.get('built_up'), withLabels.get('built_up'), 0)
+    ),
+    water: ee.Number(
+      ee.Algorithms.If(withLabels.get('water'), withLabels.get('water'), 0)
+    ),
+    other: ee.Number(
+      ee.Algorithms.If(withLabels.get('other'), withLabels.get('other'), 0)
+    )
+  });
+});
+
+// ================================
+// 🔍 DEBUG (ADD THIS)
+// ================================
+print("FeatureTable sample:", featureTable.first());
+print("FeatureTable properties:", featureTable.first().propertyNames());
+
+print("Label sample:", labelProportions.first());
+print("Final dataset sample:", finalDataset.first());
+print("Final dataset properties:", finalDataset.first().propertyNames());
+
+// ================================
+// 11. CLEAN
+// ================================
+// var cleanedDataset = finalDataset
+//   .filter(ee.Filter.notNull(['NDVI']))
+//   .select([
+//     'cell_id',
+//     'B2_mean','B3_mean','B4_mean','B8_mean','B11_mean',
+//     'NDVI_mean','NDWI_mean','NDBI_mean',
+//     'vegetation','built_up','water','other'
+//   ],[
+//     'cell_id',
+//     'B2','B3','B4','B8','B11',
+//     'NDVI','NDWI','NDBI',
+//     'vegetation','built_up','water','other'
+//   ]);
+// var cleanedDataset = finalDataset
+//   .filter(ee.Filter.notNull(['NDVI']))
+//   .select([
+//     'cell_id',
+//     'B2','B3','B4','B8','B11',
+//     'NDVI','NDWI','NDBI',
+//     'vegetation','built_up','water','other'
+//   ]);
+
+var cleanedDataset = finalDataset
+  .filter(ee.Filter.notNull(['NDVI']))
+  .select([
+    'cell_id',
+    'B2','B3','B4','B8','B11',
+    'NDVI','NDWI','NDBI',
+    'vegetation','built_up','water','other'
+  ]);
+// ================================
+// 12. PREVIEW
+// ================================
+print("Sample dataset", cleanedDataset.limit(10));
+
+// ================================
+// 13. EXPORT
+// ================================
+Export.table.toDrive({
+  collection: cleanedDataset,
+  description: "nuremberg_2020_composition_250m",
+  fileFormat: "CSV"
+});
