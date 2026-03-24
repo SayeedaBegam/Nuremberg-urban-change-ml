@@ -359,6 +359,39 @@ def _get_available_columns(frame: pd.DataFrame, class_name: str) -> tuple[str | 
     return pred_col, actual_col
 
 
+def _mode_has_data(frame: pd.DataFrame, layer_mode: str) -> bool:
+    for class_name in LAND_COVER_CLASSES:
+        if layer_mode == "composition":
+            predicted_column, _ = _selected_columns(layer_mode, class_name)
+        else:
+            predicted_column, _ = _get_available_columns(frame, class_name)
+
+        if predicted_column is None or predicted_column not in frame.columns:
+            continue
+        if pd.to_numeric(frame[predicted_column], errors="coerce").notna().any():
+            return True
+    return False
+
+
+def _available_layer_modes(frame: pd.DataFrame) -> list[str]:
+    return [layer_mode for layer_mode in LAYER_MODES if _mode_has_data(frame, layer_mode)]
+
+
+def _available_classes_for_mode(frame: pd.DataFrame, layer_mode: str) -> list[str]:
+    classes = []
+    for class_name in LAND_COVER_CLASSES:
+        if layer_mode == "composition":
+            predicted_column, _ = _selected_columns(layer_mode, class_name)
+        else:
+            predicted_column, _ = _get_available_columns(frame, class_name)
+
+        if predicted_column is None or predicted_column not in frame.columns:
+            continue
+        if pd.to_numeric(frame[predicted_column], errors="coerce").notna().any():
+            classes.append(class_name)
+    return classes if classes else LAND_COVER_CLASSES
+
+
 def _metrics_for_selection(metrics: dict, model_name: str, split_name: str) -> tuple[dict, dict]:
     model_metrics = metrics.get(model_name, {}) if isinstance(metrics, dict) else {}
     if not isinstance(model_metrics, dict):
@@ -1168,15 +1201,30 @@ if not available_splits:
     st.stop()
 
 st.sidebar.markdown("### Controls")
-selected_layer_mode = st.sidebar.radio(
-    "Change / Composition",
-    options=LAYER_MODES,
-    index=1 if "change" in LAYER_MODES else 0,
-    format_func=lambda value: value.title(),
-)
 selected_model = st.sidebar.selectbox("Model selection", available_models)
 selected_split = st.sidebar.selectbox("Data selection", available_splits)
-selected_class = st.sidebar.selectbox("Class", LAND_COVER_CLASSES, index=0)
+
+filtered_predictions = predictions[
+    (predictions["model"] == selected_model) & (predictions["split"] == selected_split)
+].copy()
+if filtered_predictions.empty:
+    st.error("No rows matched the selected model and split.")
+    st.stop()
+
+available_layer_modes = _available_layer_modes(filtered_predictions)
+if not available_layer_modes:
+    st.error("No map layer modes are available for the selected model and split.")
+    st.stop()
+
+selected_layer_mode = st.sidebar.radio(
+    "Change / Composition",
+    options=available_layer_modes,
+    index=available_layer_modes.index("change") if "change" in available_layer_modes else 0,
+    format_func=lambda value: value.title(),
+)
+
+available_classes = _available_classes_for_mode(filtered_predictions, selected_layer_mode)
+selected_class = st.sidebar.selectbox("Class", available_classes, index=0)
 
 st.sidebar.markdown("### Limits")
 st.sidebar.write(
@@ -1189,36 +1237,22 @@ best_params, split_metrics = _metrics_for_selection(metrics, selected_model, sel
 if split_metrics:
     _display_metrics(best_params, split_metrics, selected_class)
 
-filtered_predictions = predictions[
-    (predictions["model"] == selected_model) & (predictions["split"] == selected_split)
-].copy()
-if filtered_predictions.empty:
-    st.error("No rows matched the selected model and split.")
-    st.stop()
-
 effective_layer_mode = selected_layer_mode
-if selected_layer_mode == "composition":
+if effective_layer_mode == "composition":
     predicted_column = f"pred_{selected_class}_prop_t2"
     actual_column = f"actual_{selected_class}_prop_t2"
-    if predicted_column not in filtered_predictions.columns:
-        st.warning(
-            "Composition columns are unavailable in this dataset export. Showing change mode for the selected class."
-        )
-        effective_layer_mode = "change"
-        predicted_column, actual_column = _get_available_columns(filtered_predictions, selected_class)
-        if predicted_column is None:
-            st.error(f"No predicted delta columns found for {selected_class}.")
-            st.stop()
-elif selected_layer_mode == "change":
+elif effective_layer_mode == "change":
     predicted_column, actual_column = _get_available_columns(filtered_predictions, selected_class)
     if predicted_column is None:
         st.error(f"No predicted delta columns found for {selected_class}.")
         st.stop()
 else:
-    st.error(f"Unsupported layer mode: {selected_layer_mode}")
+    st.error(f"Unsupported layer mode: {effective_layer_mode}")
     st.stop()
 
-if predicted_column not in filtered_predictions.columns:
+if predicted_column not in filtered_predictions.columns or not pd.to_numeric(
+    filtered_predictions[predicted_column], errors="coerce"
+).notna().any():
     st.error(f"Missing value column `{predicted_column}` in `{APP_PREDICTIONS_PATH}`.")
     st.stop()
 
@@ -1227,11 +1261,12 @@ predicted_tooltip_columns = _build_tooltip_columns(merged, predicted_column, act
 legend_name = f"{selected_model} | {selected_split} | {effective_layer_mode} | {selected_class}"
 
 # Show map and explanation
-# For change mode with actual data, show side-by-side comparison; otherwise show single map
-show_comparison = (effective_layer_mode == "change" and
-                   actual_column and
-                   actual_column in filtered_predictions.columns and
-                   filtered_predictions[actual_column].notna().any())
+# Show side-by-side maps when actual values are available; otherwise show single map.
+show_comparison = (
+    actual_column is not None
+    and actual_column in filtered_predictions.columns
+    and pd.to_numeric(filtered_predictions[actual_column], errors="coerce").notna().any()
+)
 
 if show_comparison:
     # Calculate bounds to ensure both maps show the same area
@@ -1240,33 +1275,35 @@ if show_comparison:
     minx, miny, maxx, maxy = plot_merged.total_bounds
     map_bounds = [[miny, minx], [maxy, maxx]]
 
-    # Create tabs for uncertainty
-    tab1, tab2 = st.tabs(["📍 Change Maps", "📊 Prediction Uncertainty"])
+    map_tab_label = "📍 Composition Maps" if effective_layer_mode == "composition" else "📍 Change Maps"
+    predicted_title = "Predicted Composition" if effective_layer_mode == "composition" else "Predicted Change"
+    actual_title = "Actual Composition" if effective_layer_mode == "composition" else "Actual Change"
+    tab1, tab2 = st.tabs([map_tab_label, "📊 Prediction Uncertainty"])
 
     with tab1:
         col1, col2, col3 = st.columns([2.2, 2.2, 0.8])
 
         with col1:
-            st.subheader("Predicted Change")
+            st.subheader(predicted_title)
             predicted_map = build_map(
                 merged,
                 value_column=predicted_column,
                 tooltip_columns=predicted_tooltip_columns,
                 layer_mode=effective_layer_mode,
-                legend_name=f"Predicted {selected_class} change",
+                legend_name=f"predicted | {effective_layer_mode} | {selected_class}",
             )
             predicted_map.fit_bounds(map_bounds)
             st_folium(predicted_map, width=700, height=650)
 
         with col2:
-            st.subheader("Actual Change")
+            st.subheader(actual_title)
             actual_tooltip_columns = _build_tooltip_columns(merged, actual_column, predicted_column)
             actual_map = build_map(
                 merged,
                 value_column=actual_column,
                 tooltip_columns=actual_tooltip_columns,
                 layer_mode=effective_layer_mode,
-                legend_name=f"Actual {selected_class} change",
+                legend_name=f"actual | {effective_layer_mode} | {selected_class}",
             )
             actual_map.fit_bounds(map_bounds)
             st_folium(actual_map, width=700, height=650)
@@ -1339,10 +1376,19 @@ enhanced_metrics_payload = _load_enhanced_metrics()
 change_dataset = _load_change_dataset()
 analysis_frame = _build_analysis_frame(filtered_predictions, predicted_column, actual_column)
 
-_render_per_cell_change_analysis(filtered_predictions, selected_class, predicted_column, actual_column)
-_render_change_error_matrix(analysis_frame)
-_render_elastic_net_interpretability(selected_class, enhanced_metrics_payload, change_dataset)
-_render_noise_stress_test(analysis_frame, merged, change_dataset, enhanced_metrics_payload)
+if effective_layer_mode == "change":
+    st.caption("Change mode: showing change-focused summaries, confusion/error analysis, and stress tests.")
+    _render_change_summary(filtered_predictions)
+    _render_per_cell_change_analysis(filtered_predictions, selected_class, predicted_column, actual_column)
+    _render_change_error_matrix(analysis_frame)
+    _render_elastic_net_interpretability(selected_class, enhanced_metrics_payload, change_dataset)
+    _render_noise_stress_test(analysis_frame, merged, change_dataset, enhanced_metrics_payload)
+else:
+    st.caption("Composition mode: showing composition summaries, uncertainty, and regression error analysis.")
+    _render_composition_summary(filtered_predictions)
+    _render_uncertainty_section(filtered_predictions, merged)
+    _render_error_analysis(filtered_predictions)
+    _render_dominant_summary(filtered_predictions)
 
 # Compact metrics section to avoid image-cache warnings from large static matplotlib renders.
 st.markdown("---")
@@ -1355,13 +1401,5 @@ if actual_column and actual_column in filtered_predictions.columns:
 else:
     st.info("Detailed metrics are unavailable for this selection because actual values are missing.")
 
-# =============================================================================
-# Composition Dashboard Sections
-# =============================================================================
-_render_composition_summary(filtered_predictions)
-_render_uncertainty_section(filtered_predictions, merged)
-_render_change_summary(filtered_predictions)
-_render_error_analysis(filtered_predictions)
 comparison_summary_frame = _render_model_comparison(metrics)
-_render_dominant_summary(filtered_predictions)
 _render_downloads(filtered_predictions, comparison_summary_frame)
