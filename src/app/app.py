@@ -18,6 +18,28 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.app.explain_utils import helpful_explanation, limitations_text, misleading_explanation
 from src.app.map_utils import build_map
 from src.app.viz_utils import (
+    # Constants
+    CLASS_ORDER,
+    # Data processing
+    average_composition,
+    category_metrics_frame,
+    change_summary_long,
+    composition_summary_long,
+    dominant_summary,
+    error_scatter_frame,
+    overall_metrics_frame,
+    positive_change_share,
+    prepare_dashboard_frame,
+    top_rows,
+    uncertainty_long,
+    # Altair charts
+    boxplot_chart,
+    composition_stacked_bar,
+    grouped_bar_chart,
+    histogram_chart,
+    pie_chart,
+    scatter_chart,
+    # Matplotlib charts
     plot_predictions_vs_truth,
     plot_residuals,
     plot_distribution_comparison,
@@ -37,7 +59,7 @@ PREDICTION_GRID_PATHS = [
     PROCESSED_EE_DIR / "nuremberg_2021_composition_250m.csv",
     PROCESSED_EE_DIR / "nuremberg_2019_features_250m.csv",
 ]
-LAND_COVER_CLASSES = ["built_up", "vegetation", "water", "other"]
+LAND_COVER_CLASSES = CLASS_ORDER  # Use from viz_utils
 LAYER_MODES = ["composition", "change"]
 
 
@@ -134,7 +156,9 @@ def _load_predictions() -> pd.DataFrame:
         st.error(f"`{APP_PREDICTIONS_PATH}` is missing required columns: {sorted(missing)}")
         st.stop()
 
-    return _compute_delta_columns(predictions)
+    predictions["cell_id"] = predictions["cell_id"].astype(str)
+    predictions = _compute_delta_columns(predictions)
+    return prepare_dashboard_frame(predictions)
 
 
 def _load_metrics() -> dict:
@@ -239,6 +263,265 @@ def _change_mode_available(frame: pd.DataFrame, predicted_column: str) -> bool:
 def _actual_map_title(split_name: str) -> str:
     year_token = split_name.split("_")[-1]
     return f"Actual {year_token} labels" if year_token.isdigit() else "Actual T2 labels"
+
+
+def _available_uncertainty_columns(frame: pd.DataFrame) -> list[str]:
+    columns = []
+    if "uncertainty_mean" in frame.columns and frame["uncertainty_mean"].notna().any():
+        columns.append("uncertainty_mean")
+    columns.extend(
+        [
+            f"uncertainty_{class_name}"
+            for class_name in LAND_COVER_CLASSES
+            if f"uncertainty_{class_name}" in frame.columns and frame[f"uncertainty_{class_name}"].notna().any()
+        ]
+    )
+    return columns
+
+
+def _actual_available(frame: pd.DataFrame) -> bool:
+    return any(f"actual_{class_name}_prop_t2" in frame.columns for class_name in LAND_COVER_CLASSES)
+
+
+def _render_composition_summary(frame: pd.DataFrame) -> None:
+    st.divider()
+    st.header("Land-Cover Composition Summary")
+
+    summary_long = composition_summary_long(frame)
+    if summary_long.empty:
+        st.info("Composition summary is unavailable because the required T1/T2 composition columns are missing.")
+        return
+
+    col1, col2 = st.columns([1.35, 1.15])
+    with col1:
+        st.altair_chart(composition_stacked_bar(summary_long), use_container_width=True)
+
+    with col2:
+        pie_cols = st.columns(2)
+        predicted_avg = average_composition(frame, "pred_{class_name}_prop_t2")
+        actual_avg = average_composition(frame, "actual_{class_name}_prop_t2")
+        with pie_cols[0]:
+            if not predicted_avg.empty:
+                st.altair_chart(pie_chart(predicted_avg, "Predicted T2 average"), use_container_width=True)
+        with pie_cols[1]:
+            if not actual_avg.empty:
+                st.altair_chart(pie_chart(actual_avg, "Actual T2 average"), use_container_width=True)
+            else:
+                st.info("Actual T2 composition is unavailable for the current selection.")
+
+
+def _render_uncertainty_section(frame: pd.DataFrame, merged: gpd.GeoDataFrame) -> None:
+    st.divider()
+    st.header("Confidence / Uncertainty Analysis")
+
+    uncertainty_columns = _available_uncertainty_columns(frame)
+    if not uncertainty_columns:
+        st.info("No uncertainty columns are available in the current prediction export.")
+        return
+
+    selected_uncertainty = st.selectbox(
+        "Uncertainty view",
+        uncertainty_columns,
+        index=uncertainty_columns.index("uncertainty_mean") if "uncertainty_mean" in uncertainty_columns else 0,
+        key="uncertainty_selector",
+    )
+    uncertainty_melted = uncertainty_long(frame)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.altair_chart(
+            histogram_chart(frame, selected_uncertainty, selected_uncertainty.replace("_", " ")),
+            use_container_width=True,
+        )
+    with col2:
+        if uncertainty_melted.empty:
+            st.info("Class-wise uncertainty columns are not available for the current selection.")
+        else:
+            st.altair_chart(
+                boxplot_chart(uncertainty_melted, "uncertainty", "class", "Uncertainty by class"),
+                use_container_width=True,
+            )
+
+    table_columns = ["cell_id", selected_uncertainty, "uncertainty_mean"] + [f"uncertainty_{class_name}" for class_name in LAND_COVER_CLASSES]
+    top_uncertainty = top_rows(frame, selected_uncertainty, table_columns, n_rows=12)
+    if not top_uncertainty.empty:
+        st.dataframe(top_uncertainty, use_container_width=True)
+
+    if st.checkbox("Show uncertainty heat map", value=False, key="uncertainty_map_toggle"):
+        uncertainty_map = build_map(
+            merged,
+            value_column=selected_uncertainty,
+            tooltip_columns=_build_tooltip_columns(merged, selected_uncertainty),
+            layer_mode="composition",
+            legend_name=f"uncertainty | {selected_uncertainty}",
+        )
+        st_folium(uncertainty_map, width=1100, height=500)
+
+
+def _render_change_summary(frame: pd.DataFrame) -> None:
+    st.divider()
+    st.header("Land-Cover Change Summary")
+
+    change_long = change_summary_long(frame)
+    if change_long.empty:
+        st.info("Change summary is unavailable because the required T1 composition columns are missing.")
+        return
+
+    col1, col2 = st.columns([1.35, 1.15])
+    with col1:
+        st.altair_chart(
+            grouped_bar_chart(change_long, "class", "value", "source", "Average delta"),
+            use_container_width=True,
+        )
+    with col2:
+        predicted_positive = positive_change_share(frame, "pred_delta_{class_name}")
+        actual_positive = positive_change_share(frame, "actual_delta_{class_name}")
+        pie_cols = st.columns(2)
+        with pie_cols[0]:
+            if not predicted_positive.empty and predicted_positive["value"].sum() > 0:
+                st.altair_chart(pie_chart(predicted_positive, "Predicted positive change"), use_container_width=True)
+            else:
+                st.info("No positive predicted change is present for the current selection.")
+        with pie_cols[1]:
+            if not actual_positive.empty and actual_positive["value"].sum() > 0:
+                st.altair_chart(pie_chart(actual_positive, "Actual positive change"), use_container_width=True)
+
+
+def _render_error_analysis(frame: pd.DataFrame) -> None:
+    st.divider()
+    st.header("Prediction Error Analysis")
+
+    if not _actual_available(frame):
+        st.info("Actual T2 columns are unavailable, so prediction error analysis cannot be shown.")
+        return
+
+    error_selector = st.selectbox(
+        "Error class",
+        ["built_up", "vegetation", "water", "other", "mean"],
+        key="error_selector",
+    )
+    error_column = "abs_error_mean" if error_selector == "mean" else f"abs_error_{error_selector}"
+    if error_column not in frame.columns:
+        st.info(f"The column `{error_column}` is unavailable for the current selection.")
+        return
+
+    col1, col2 = st.columns([1.0, 1.2])
+    with col1:
+        st.altair_chart(histogram_chart(frame, error_column, error_column.replace("_", " ")), use_container_width=True)
+    with col2:
+        if error_selector == "mean":
+            st.info("Predicted vs actual scatter is shown for individual classes only. Select a specific class to view it.")
+        else:
+            scatter_data = error_scatter_frame(frame, error_selector)
+            if scatter_data.empty:
+                st.info("Predicted vs actual scatter is unavailable for the current selection.")
+            else:
+                st.altair_chart(scatter_chart(scatter_data, f"Predicted vs actual: {error_selector}"), use_container_width=True)
+
+    worst_columns = [
+        "cell_id",
+        error_column,
+        f"pred_{error_selector}_prop_t2" if error_selector != "mean" else None,
+        f"actual_{error_selector}_prop_t2" if error_selector != "mean" else None,
+        "abs_error_mean",
+        "uncertainty_mean",
+    ]
+    worst_table = top_rows(frame, error_column, [column for column in worst_columns if column], n_rows=12)
+    if not worst_table.empty:
+        st.dataframe(worst_table, use_container_width=True)
+
+
+def _render_model_comparison(metrics_payload: dict) -> pd.DataFrame:
+    st.divider()
+    st.header("Model Comparison Across Splits")
+
+    summary_tables = []
+
+    st.subheader("Category-wise Comparison")
+    selected_metric_class = st.selectbox("Category", LAND_COVER_CLASSES, key="comparison_category_selector")
+    category_frame = category_metrics_frame(metrics_payload, selected_metric_class)
+    if category_frame.empty:
+        st.info("Category-wise metrics are unavailable in `metrics.json`.")
+    else:
+        chart_cols = st.columns(3)
+        for column_container, metric_name, label in zip(chart_cols, ["r2", "mae", "rmse"], ["R²", "MAE", "RMSE"]):
+            metric_df = category_frame.dropna(subset=[metric_name])
+            if metric_df.empty:
+                column_container.info(f"No {label} values available.")
+            else:
+                column_container.altair_chart(
+                    grouped_bar_chart(metric_df, "model", metric_name, "split", label),
+                    use_container_width=True,
+                )
+        st.dataframe(category_frame, use_container_width=True)
+        category_export = category_frame.copy()
+        category_export.insert(0, "section", f"category:{selected_metric_class}")
+        summary_tables.append(category_export)
+
+    st.subheader("Overall Comparison")
+    overall_frame = overall_metrics_frame(metrics_payload)
+    if overall_frame.empty:
+        st.info("Overall metrics are unavailable in `metrics.json`.")
+    else:
+        chart_cols = st.columns(3)
+        for column_container, metric_name, label in zip(chart_cols, ["r2", "mae", "rmse"], ["Overall R²", "Overall MAE", "Overall RMSE"]):
+            metric_df = overall_frame.dropna(subset=[metric_name])
+            if metric_df.empty:
+                column_container.info(f"No {label} values available.")
+            else:
+                column_container.altair_chart(
+                    grouped_bar_chart(metric_df, "model", metric_name, "split", label),
+                    use_container_width=True,
+                )
+        st.dataframe(overall_frame, use_container_width=True)
+        overall_export = overall_frame.copy()
+        overall_export.insert(0, "section", "overall")
+        summary_tables.append(overall_export)
+
+    return pd.concat(summary_tables, ignore_index=True) if summary_tables else pd.DataFrame()
+
+
+def _render_dominant_summary(frame: pd.DataFrame) -> None:
+    dominant_counts, dominant_margins = dominant_summary(frame)
+    if dominant_counts.empty:
+        return
+
+    st.divider()
+    st.header("Dominant Land-Cover Summary")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.altair_chart(pie_chart(dominant_counts.rename(columns={"count": "value"}), "Dominant predicted class"), use_container_width=True)
+    with col2:
+        if dominant_margins.empty:
+            st.info("Dominant margin values are unavailable.")
+        else:
+            st.altair_chart(
+                grouped_bar_chart(dominant_margins.rename(columns={"margin_bin": "bin", "count": "value"}), "bin", "value", "bin", "Dominant margin distribution"),
+                use_container_width=True,
+            )
+
+
+def _render_downloads(filtered_frame: pd.DataFrame, comparison_frame: pd.DataFrame) -> None:
+    st.divider()
+    st.header("Download / Export")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="Download filtered prediction table",
+            data=filtered_frame.to_csv(index=False).encode("utf-8"),
+            file_name="filtered_predictions.csv",
+            mime="text/csv",
+        )
+    with col2:
+        if comparison_frame.empty:
+            st.info("Model comparison summary is unavailable for download.")
+        else:
+            st.download_button(
+                label="Download model comparison summary",
+                data=comparison_frame.to_csv(index=False).encode("utf-8"),
+                file_name="model_comparison_summary.csv",
+                mime="text/csv",
+            )
 
 
 predictions = _load_predictions()
@@ -493,3 +776,14 @@ else:
         "Predictions vs Truth analysis requires actual values to be present in the dataset. "
         "Change to composition mode if not already selected."
     )
+
+# =============================================================================
+# Composition Dashboard Sections
+# =============================================================================
+_render_composition_summary(filtered_predictions)
+_render_uncertainty_section(filtered_predictions, merged)
+_render_change_summary(filtered_predictions)
+_render_error_analysis(filtered_predictions)
+comparison_summary_frame = _render_model_comparison(metrics)
+_render_dominant_summary(filtered_predictions)
+_render_downloads(filtered_predictions, comparison_summary_frame)
