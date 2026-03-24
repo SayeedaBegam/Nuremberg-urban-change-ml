@@ -15,7 +15,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from src.models.evaluate import regression_metrics
-from src.models.uncertainty import random_forest_uncertainty
+from src.models.uncertainty import random_forest_uncertainty, elastic_net_uncertainty
 from src.utils.config import CHANGE_TARGET_COLUMNS, MODELS_DIR, PROCESSED_DIR, RANDOM_STATE
 from src.utils.io import ensure_directories, save_dataframe, save_model
 
@@ -248,22 +248,38 @@ def main() -> None:
     logger.info("="*50)
 
     # Compute uncertainty
+    # Random Forest uncertainty from tree disagreement
     rf_model = forest_model.named_steps["model"]
     imputer = forest_model.named_steps["imputer"]
     x_test_imputed = imputer.transform(x_test)
     built_up_rf = rf_model.estimators_[0]
-    built_up_uncertainty = random_forest_uncertainty(built_up_rf, x_test_imputed)
+    built_up_uncertainty_rf = random_forest_uncertainty(built_up_rf, x_test_imputed)
+    
+    # Elastic Net uncertainty based on residuals
+    elastic_pred_values = elastic_model.predict(x_test)
+    built_up_uncertainty_en = elastic_net_uncertainty(y_test["delta_built_up"].values, elastic_pred_values[:, 0])
 
-    # Export predictions
+    # Export predictions - Random Forest
     prediction_export = test_df[["cell_id", "centroid_x_t1", "centroid_y_t1"]].copy()
     for target in CHANGE_TARGET_COLUMNS:
         prediction_export[f"actual_{target}"] = y_test[target].values
         prediction_export[f"pred_{target}"] = forest_pred[target].values
-    prediction_export["uncertainty_built_up"] = built_up_uncertainty
+    prediction_export["uncertainty_built_up"] = built_up_uncertainty_rf
     prediction_export["model"] = "random_forest"
     prediction_export["split"] = "test_2020_2021"
-
-    save_dataframe(prediction_export, PROCESSED_DIR / "app_predictions_2020_2021.csv")
+    
+    # Also export elastic net predictions with uncertainty
+    elastic_export = test_df[["cell_id", "centroid_x_t1", "centroid_y_t1"]].copy()
+    for target in CHANGE_TARGET_COLUMNS:
+        elastic_export[f"actual_{target}"] = y_test[target].values
+        elastic_export[f"pred_{target}"] = elastic_pred[target].values
+    elastic_export["uncertainty_built_up"] = built_up_uncertainty_en
+    elastic_export["model"] = "elastic_net"
+    elastic_export["split"] = "test_2020_2021"
+    
+    # Combine and export
+    full_export = pd.concat([prediction_export, elastic_export], ignore_index=True)
+    save_dataframe(full_export, PROCESSED_DIR / "app_predictions_2020_2021.csv")
     logger.info(f"✅ Predictions exported to app_predictions_2020_2021.csv")
 
     # Save models

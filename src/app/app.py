@@ -272,6 +272,7 @@ def _elastic_predictions_from_artifacts(reference_splits: tuple[str, ...]) -> pd
 
     try:
         from src.models.train_2020_2021_enhanced import _create_enhanced_features, _feature_columns
+        from src.models.uncertainty import elastic_net_uncertainty
     except Exception:
         return pd.DataFrame()
 
@@ -300,7 +301,21 @@ def _elastic_predictions_from_artifacts(reference_splits: tuple[str, ...]) -> pd
         export["centroid_x_t1"] = change_data["centroid_x_t1"]
     if "centroid_y_t1" in change_data.columns:
         export["centroid_y_t1"] = change_data["centroid_y_t1"]
-    export["uncertainty_built_up"] = np.nan
+    
+    # Calculate uncertainty based on residuals
+    actual_built_up = pd.to_numeric(change_data.get("delta_built_up", pd.Series()), errors="coerce")
+    pred_built_up = pd.to_numeric(pred_frame.get("delta_built_up", pd.Series()), errors="coerce")
+    
+    # Only calculate uncertainty where we have valid predictions
+    valid_mask = actual_built_up.notna() & pred_built_up.notna()
+    uncertainty = np.full(len(export), np.nan)
+    if valid_mask.any():
+        uncertainty[valid_mask] = elastic_net_uncertainty(
+            actual_built_up[valid_mask].values,
+            pred_built_up[valid_mask].values
+        )
+    
+    export["uncertainty_built_up"] = uncertainty
     export["model"] = "elastic_net"
     export["split"] = reference_splits[0] if reference_splits else "full_2020_2021_enhanced"
     return export

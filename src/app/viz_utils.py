@@ -127,6 +127,11 @@ def positive_change_share(frame: pd.DataFrame, template: str) -> pd.DataFrame:
 def uncertainty_long(frame: pd.DataFrame) -> pd.DataFrame:
     columns = {class_name: f"uncertainty_{class_name}" for class_name in CLASS_ORDER if f"uncertainty_{class_name}" in frame.columns}
     if not columns:
+        # If no per-class uncertainty columns, try to use uncertainty_mean
+        if "uncertainty_mean" in frame.columns:
+            melted = frame[["uncertainty_mean"]].rename(columns={"uncertainty_mean": "uncertainty"})
+            melted["class"] = "mean"
+            return melted.dropna()
         return pd.DataFrame()
     melted = frame[list(columns.values())].rename(columns={value: key for key, value in columns.items()}).melt(
         var_name="class", value_name="uncertainty"
