@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+from src.utils.common_config_ee_osm import (
+    FEATURE_COLUMNS_EE_OSM,
+    FINAL_TARGET_COLUMNS_EE_OSM,
+    FORWARD_DATA_PATH_EE_OSM,
+    MODELS_DIR_EE_OSM,
+    RANDOM_STATE_EE_OSM,
+    TEST_SIZE_EE_OSM,
+    TRAIN_DATA_PATH_EE_OSM,
+    TRAIN_TARGET_COLUMNS_EE_OSM,
+    VALIDATION_SIZE_EE_OSM,
+)
+
+
+MODEL_OUTPUT_DIR_EE_OSM = MODELS_DIR_EE_OSM / "random_forest_ee_osm"
+
+N_ESTIMATORS_GRID_EE_OSM = [100, 200, 300]
+MAX_DEPTH_GRID_EE_OSM = [None, 10, 20]
+MIN_SAMPLES_LEAF_GRID_EE_OSM = [1, 3, 5]
+MAX_FEATURES_GRID_EE_OSM = ["sqrt", 0.8]

@@ -149,8 +149,15 @@ def dominant_summary(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     counts = (
         frame.groupby("dominant_class_pred", dropna=False).size().rename("count").reset_index().rename(columns={"dominant_class_pred": "class"})
     )
-    bins = pd.interval_range(start=0.0, end=1.0, periods=5)
-    margin_binned = pd.cut(frame["dominant_margin_pred"], bins=bins, include_lowest=True)
+    bin_edges = np.linspace(0.0, 1.0, 6)
+    bin_labels = [f"{bin_edges[idx]:.1f}-{bin_edges[idx + 1]:.1f}" for idx in range(len(bin_edges) - 1)]
+    margin_binned = pd.cut(
+        frame["dominant_margin_pred"],
+        bins=bin_edges,
+        labels=bin_labels,
+        include_lowest=True,
+        right=True,
+    )
     margins = margin_binned.value_counts().sort_index().reset_index()
     margins.columns = ["margin_bin", "count"]
     margins["margin_bin"] = margins["margin_bin"].astype(str)
@@ -292,3 +299,47 @@ def scatter_chart(dataframe: pd.DataFrame, title: str) -> alt.LayerChart:
     line_df = pd.DataFrame({"actual": [lower, upper], "predicted": [lower, upper]})
     reference = alt.Chart(line_df).mark_line(strokeDash=[6, 4], color="#cccccc").encode(x="actual:Q", y="predicted:Q")
     return (points + reference).properties(title=title)
+
+
+def confusion_matrix_chart(dataframe: pd.DataFrame) -> alt.Chart:
+    label_order = ["Unchanged", "Changed"]
+    return (
+        alt.Chart(dataframe)
+        .mark_rect()
+        .encode(
+            x=alt.X("predicted_label:N", sort=label_order, title="Predicted"),
+            y=alt.Y("actual_label:N", sort=label_order, title="Actual"),
+            color=alt.Color("count:Q", scale=alt.Scale(scheme="blues"), title="Cells"),
+            tooltip=["actual_label", "predicted_label", "cell_type", alt.Tooltip("count:Q", format=",d")],
+        )
+        .properties(height=260)
+    )
+
+
+def confusion_text_overlay(dataframe: pd.DataFrame) -> alt.Chart:
+    return alt.Chart(dataframe).mark_text(fontSize=14, fontWeight="bold").encode(
+        x=alt.X("predicted_label:N", sort=["Unchanged", "Changed"]),
+        y=alt.Y("actual_label:N", sort=["Unchanged", "Changed"]),
+        text=alt.Text("count:Q", format=",d"),
+        color=alt.value("white"),
+    )
+
+
+def coefficient_bar_chart(dataframe: pd.DataFrame, title: str) -> alt.Chart:
+    chart_frame = dataframe.copy()
+    chart_frame["direction"] = np.where(chart_frame["coefficient"] >= 0, "Positive", "Negative")
+    return (
+        alt.Chart(chart_frame)
+        .mark_bar()
+        .encode(
+            x=alt.X("coefficient:Q", title="Coefficient"),
+            y=alt.Y("feature:N", sort=alt.SortField(field="sort_order", order="ascending"), title=None),
+            color=alt.Color(
+                "direction:N",
+                scale=alt.Scale(domain=["Positive", "Negative"], range=["#31a354", "#de2d26"]),
+                title=None,
+            ),
+            tooltip=["feature", alt.Tooltip("coefficient:Q", format=".4f"), alt.Tooltip("abs_coefficient:Q", format=".4f")],
+        )
+        .properties(title=title, height=360)
+    )

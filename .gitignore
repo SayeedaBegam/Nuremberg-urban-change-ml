@@ -10,3 +10,8 @@ models/*
 !data/interim/.gitkeep
 !data/processed/.gitkeep
 !models/.gitkeep
+data/osm/**
+!data/osm/
+!data/osm/README.md
+!data/osm/*/
+!data/osm/*/.gitkeep
