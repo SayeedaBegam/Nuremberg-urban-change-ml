@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import folium
 import geopandas as gpd
@@ -14,7 +15,6 @@ COMPOSITION_COLORS = {
     "water": ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"],
     "other": ["#f7f7f7", "#d9d9d9", "#bdbdbd", "#969696", "#636363"],
 }
-UNCERTAINTY_COLORS = ["#fcfbfd", "#dadaeb", "#9e9ac8", "#756bb1", "#54278f"]
 DIVERGING_COLORS = ["#2166ac", "#67a9cf", "#f7f7f7", "#ef8a62", "#b2182b"]
 
 
@@ -45,11 +45,48 @@ def _build_colormap(values: pd.Series, layer_mode: str, value_column: str) -> Li
     vmin, vmax = _value_bounds(values, layer_mode)
     if layer_mode == "change":
         colors = DIVERGING_COLORS
-    elif "uncertainty" in value_column:
-        colors = UNCERTAINTY_COLORS
     else:
         colors = COMPOSITION_COLORS[_target_class(value_column)]
     return LinearColormap(colors=colors, vmin=vmin, vmax=vmax)
+
+
+def _load_nuremberg_boundary() -> gpd.GeoDataFrame | None:
+    """Load Nuremberg city boundary from geojson file."""
+    boundary_path = Path(__file__).resolve().parents[2] / "data" / "raw" / "nuremberg_boundary.geojson"
+    if not boundary_path.exists():
+        return None
+    try:
+        return gpd.read_file(boundary_path).to_crs(4326)
+    except Exception:
+        return None
+
+
+def add_boundary_layer(fmap: folium.Map, layer_name: str = "Nuremberg Boundary") -> None:
+    """Add Nuremberg city boundary as an overlay layer to the map."""
+    boundary_gdf = _load_nuremberg_boundary()
+    if boundary_gdf is None or boundary_gdf.empty:
+        return
+
+    # Create boundary GeoJson layer with styling
+    boundary_geojson = json.loads(boundary_gdf.to_json())
+    boundary_layer = folium.GeoJson(
+        data=boundary_geojson,
+        style_function=lambda feature: {
+            "fillColor": "none",
+            "color": "#FFD700",  # Gold outline
+            "weight": 3,
+            "opacity": 0.9,
+            "dashArray": "5, 5",  # Dashed line
+            "fillOpacity": 0,
+        },
+        highlight_function=lambda feature: {
+            "color": "#FFA500",
+            "weight": 4,
+            "opacity": 1.0,
+        },
+        name=layer_name,
+    )
+    boundary_layer.add_to(fmap)
 
 
 def build_map(
@@ -58,6 +95,7 @@ def build_map(
     tooltip_columns: list[str],
     layer_mode: str,
     legend_name: str,
+    show_boundary: bool = True,
 ) -> folium.Map:
     if gdf.empty:
         raise ValueError("Cannot build a map from an empty GeoDataFrame.")
@@ -98,7 +136,17 @@ def build_map(
             sticky=False,
             labels=True,
         ),
+        name="Grid Cells",
     )
     geojson.add_to(fmap)
+    
+    # Add Nuremberg boundary overlay if requested
+    if show_boundary:
+        add_boundary_layer(fmap)
+    
     colormap.add_to(fmap)
+    
+    # Add layer control
+    folium.LayerControl().add_to(fmap)
+    
     return fmap
